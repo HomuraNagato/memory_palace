@@ -1,0 +1,240 @@
+version: 2
+name: memory-palace-retrieval
+description: >
+  Retrieval evaluation cases for Memory Palace. Each expected result uses a
+  source identity plus an evidence anchor. Source identity stays stable across
+  rechunking; evidence recall confirms that retrieval found the relevant passage
+  rather than an arbitrary chunk from the same document.
+
+defaults:
+  user_key: local
+  scope: memories
+  collection: obsidian
+  mode: hybrid
+  expected_top_k: 5
+
+queries:
+  - id: relationship_mark_interview_support
+    difficulty: hard
+    category: relationship
+    query: "Who was credited with the rigorous preparation that helped someone secure an Amazon position?"
+    expected:
+      source:
+        relative_path: "diary/2024/10 October/2024.10.03 - Thursday.md"
+        title: "2024.10.03 - Thursday.md"
+      evidence_contains: "strict but important interview prep"
+
+  - id: book_uprooted_dragon_selection
+    difficulty: hard
+    category: relationship
+    query: "Which beloved childhood friend does the narrator expect the wizard called the Dragon to choose from their village?"
+    expected:
+      source:
+        scope: library
+        collection: library
+        relative_path: "Uprooted (8)/Uprooted - Naomi Novik.epub"
+        title: Uprooted
+      evidence_contains: "we all knew he would take Kasia"
+
+  - id: relationship_nj_social_knowledge
+    difficulty: hard
+    category: relationship
+    query: "Which companion pointed out that the author lived in a social-knowledge bubble during a New Jersey visit?"
+    expected:
+      source:
+        relative_path: "diary/2025/11 November/2025-Nov-02.md"
+        title: "2025-Nov-02.md"
+      evidence_contains: "how much of a bubble I lived in"
+
+  - id: book_uprooted_valley_protection
+    difficulty: hard
+    category: relationship
+    query: "Which powerful wizard is bound to protect a valley from the corrupted Wood?"
+    expected:
+      source:
+        scope: library
+        collection: library
+        relative_path: "Uprooted (8)/Uprooted - Naomi Novik.epub"
+        title: Uprooted
+      evidence_contains: "stay here and watch the Wood"
+
+  - id: book_scholomance_orion_rescues
+    difficulty: hard
+    category: relationship
+    query: "Which celebrated student becomes El's unwanted personal rescuer after repeatedly saving her?"
+    expected:
+      source:
+        scope: library
+        collection: library
+        relative_path: "A Deadly Education (The Scholomance) (11)/A Deadly Education (The Scholom - Naomi Novik.epub"
+        title: "A Deadly Education (The Scholomance)"
+      evidence_contains: "Orion Lake, my personal bodyguard"
+
+  - id: book_scholomance_aadhya_artifice
+    difficulty: hard
+    category: relationship
+    query: "Which pragmatic artificer joins El's dangerous three-discipline mirror project?"
+    expected:
+      source:
+        scope: library
+        collection: library
+        relative_path: "A Deadly Education (The Scholomance) (11)/A Deadly Education (The Scholom - Naomi Novik.epub"
+        title: "A Deadly Education (The Scholomance)"
+      evidence_contains: "three-discipline project"
+
+  - id: relationship_old_dancing_video
+    difficulty: hard
+    category: relationship
+    query: "Which pair in an old school-age dance video seemed meant for each other to the author?"
+    expected:
+      source:
+        relative_path: "dreams/2025/2025.11.11.md"
+        title: "2025.11.11.md"
+      evidence_contains: "Maybe they are meant for each other"
+
+  - id: relationship_dentist_referral
+    difficulty: hard
+    category: relationship
+    query: "Who had previously found the Gangnam dentist the author used after a broken filling?"
+    expected:
+      source:
+        relative_path: "diary/2023/11 November/2023.11.08 - Wednesday.md"
+        title: "2023.11.08 - Wednesday.md"
+      evidence_contains: "a place in Gangnam that Mark found"
+
+  - id: relationship_jewelry_family_trade
+    difficulty: hard
+    category: relationship
+    query: "Whose father trains her in jewelry work?"
+    expected:
+      source:
+        relative_path: "ひと/Serene.md"
+        title: "Serene.md"
+      evidence_contains: "works as a jeweler in training with her dad"
+
+  - id: relationship_life_reason
+    difficulty: hard
+    category: relationship
+    query: "Which partner gave the author a stronger reason to live while reflecting on a nightmare?"
+    expected:
+      source:
+        relative_path: "dreams/2025/2025.10.31.md"
+        title: "2025.10.31.md"
+      evidence_contains: "Now that I'm with Serene I have greater reason to live"
+
+  - id: relationship_queens_10k_companions
+    difficulty: hard
+    category: relationship
+    query: "At the Queens 10K, whose finish time was listed alongside Sabrina's, and who completed later?"
+    expected:
+      source:
+        relative_path: "memory palace/queens 10k.md"
+        title: "queens 10k.md"
+      evidence_contains: "Mark and Sabrina: 1:03:47"
+
+  - id: relationship_mark_nostalgia
+    difficulty: hard
+    category: relationship
+    query: "Who did a game-video montage make the author remember with bittersweet sadness?"
+    expected:
+      source:
+        relative_path: "diary/2025/11 November/2025-Nov-06.md"
+        title: "2025-Nov-06.md"
+      evidence_contains: "It makes me think of Mark"
+
+  - id: book_scholomance_liu_friendship
+    difficulty: hard
+    category: relationship
+    query: "Which feared maleficer remains one of the few students willing to keep El company?"
+    expected:
+      source:
+        scope: library
+        collection: library
+        relative_path: "A Deadly Education (The Scholomance) (11)/A Deadly Education (The Scholom - Naomi Novik.epub"
+        title: "A Deadly Education (The Scholomance)"
+      evidence_contains: "Liu may be a dark witch"
+
+  - id: book_scholomance_important_book
+    difficulty: hard
+    category: relationship
+    query: "What is an important book El receives while at the Scholomance?"
+    expected:
+      source:
+        scope: library
+        collection: library
+        relative_path: "A Deadly Education (The Scholomance) (11)/A Deadly Education (The Scholom - Naomi Novik.epub"
+        title: "A Deadly Education (The Scholomance)"
+      evidence_contains: "The Golden Stone sutras are famous"
+      answer_contains: "Golden Stone sutras"
+
+  - id: semantic_soy_coffee_drink
+    difficulty: easy
+    category: semantic
+    query: "What is the usual green nut-flavored blended coffee drink made with a soy substitute?"
+    expected:
+      source:
+        relative_path: "cafes-shops/habitual food orders/starbucks.md"
+        title: "starbucks.md"
+      evidence_contains: "pistachio creme frappuchinno with soy milk"
+
+  - id: semantic_korean_pause_and_apology
+    difficulty: easy
+    category: semantic
+    query: "Where are the basic Korean phrases for asking someone to wait and saying sorry?"
+    expected:
+      source:
+        relative_path: "languages/Korean/korean greetings.md"
+        title: "korean greetings.md"
+      evidence_contains: "one moment please"
+
+  - id: semantic_roommate_screening
+    difficulty: easy
+    category: semantic
+    query: "What checklist covers compatibility questions before sharing an apartment with someone?"
+    expected:
+      source:
+        relative_path: "memory palace/roommate questions.md"
+        title: "roommate questions.md"
+      evidence_contains: "how clean are you in a kitchen?"
+
+  - id: semantic_queens_race_plan
+    difficulty: easy
+    category: semantic
+    query: "Which note has the Corona Park race schedule, restaurant stops, and 10K finish results?"
+    expected:
+      source:
+        relative_path: "memory palace/queens 10k.md"
+        title: "queens 10k.md"
+      evidence_contains: "race starts at 9:35am"
+
+  - id: semantic_holiday_shopping
+    difficulty: easy
+    category: semantic
+    query: "Where is the running list of winter holiday present ideas organized by recipient?"
+    expected:
+      source:
+        relative_path: "memory palace/Christmas presents.md"
+        title: "Christmas presents.md"
+      evidence_contains: "serene: Disney ticket, Pokemon z-a"
+
+  - id: semantic_magic_school_book
+    difficulty: easy
+    category: semantic
+    query: "Which diary entry says the author completed the first novel in a dangerous magic-school series?"
+    expected:
+      source:
+        relative_path: "diary/2025/11 November/2025-Nov-30.md"
+        title: "2025-Nov-30.md"
+      evidence_contains: "finished book one of the Scholomance trilogy"
+
+  - id: semantic_uprooted_wood
+    difficulty: easy
+    category: semantic
+    query: "Which fantasy novel follows a valley defended from a malevolent forest by a wizard known as the Dragon?"
+    expected:
+      source:
+        scope: library
+        collection: library
+        relative_path: "Uprooted (8)/Uprooted - Naomi Novik.epub"
+        title: Uprooted
+      evidence_contains: "He protects us against the Wood"

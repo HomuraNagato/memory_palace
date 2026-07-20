@@ -1,0 +1,59 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+env.yaml
+
+# Runtime data is mounted into the container and is not repository content.
+/src/data/
+
+# Downloaded models and vendored third-party source trees
+/src/libraries/
+/src/cpp/models/
+/src/cpp/cpp_include/cpp-chunker/
+
+# C and C++ build outputs
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+/src/cpp/bin/
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+compile_commands.json
+
+# Go build and test artifacts
+/src/go/bin/
+*.test
+*.prof
+coverage.out
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+dist/
+*.egg-info/
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*~
+*.swp
+*.swo
+
+# Local logs and temporary files
+*.log
+*.tmp
+*.temp

@@ -1,0 +1,6 @@
+src/data
+src/libraries
+src/cpp/bin
+**/*.o
+**/*~
+.git

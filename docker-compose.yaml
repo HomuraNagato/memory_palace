@@ -1,0 +1,48 @@
+services:
+  memory_palace:
+    image: debian:bookworm-slim
+    container_name: memory_palace
+    hostname: memory_palace
+    stdin_open: true
+    tty: true
+    network_mode: host
+    privileged: true
+    working_dir: /home/src/go
+    build:
+      context: ./
+      dockerfile: ./Dockerfile
+    volumes:
+      - ./:/home
+      - ${MEMORY_PALACE_OBSIDIAN_PATH:-/exos/nagato/NovaCrystalis/atelier/emacs/obsidian}:/home/src/data/obsidian:ro
+      - ${MEMORY_PALACE_LIBRARY_PATH:-/exos/nagato/NovaCrystalis/atelier/library}:/home/src/data/library:ro
+      - memory_palace_vol:/var/lib/memory_palace
+#     - /usr/share/ollama/.ollama:/root/.ollama
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - LLAMA_CLOUD_API_KEY=${LLAMA_CLOUD_API_KEY:-}
+      - MEMORY_PALACE_DATABASE_URL=${MEMORY_PALACE_DATABASE_URL:-host=100.73.65.14 port=5438 dbname=pensieve user=postgres password=postgres sslmode=disable}
+      - MEMORY_PALACE_HTTP_ADDR=${MEMORY_PALACE_HTTP_ADDR:-:8013}
+      - MEMORY_PALACE_EMBEDDING_URL=${MEMORY_PALACE_EMBEDDING_URL:-http://127.0.0.1:5021/v1/embeddings}
+      - MEMORY_PALACE_EMBEDDING_MODEL=${MEMORY_PALACE_EMBEDDING_MODEL:-Qwen3-Embedding-0.6B}
+      - MEMORY_PALACE_EMBEDDING_API_KEY=${MEMORY_PALACE_EMBEDDING_API_KEY:-}
+      - MEMORY_PALACE_CONTEXTUALIZER_URL=${MEMORY_PALACE_CONTEXTUALIZER_URL:-http://127.0.0.1:5014/v1/chat/completions}
+      - MEMORY_PALACE_CONTEXTUALIZER_MODEL=${MEMORY_PALACE_CONTEXTUALIZER_MODEL:-auto}
+      - MEMORY_PALACE_CONTEXTUALIZER_BATCH_SIZE=${MEMORY_PALACE_CONTEXTUALIZER_BATCH_SIZE:-4}
+      - MEMORY_PALACE_QUERY_REWRITER_URL=${MEMORY_PALACE_QUERY_REWRITER_URL:-http://127.0.0.1:5014/v1/chat/completions}
+      - MEMORY_PALACE_QUERY_REWRITER_MODEL=${MEMORY_PALACE_QUERY_REWRITER_MODEL:-auto}
+      - MEMORY_PALACE_QUERY_REWRITER_TIMEOUT_MS=${MEMORY_PALACE_QUERY_REWRITER_TIMEOUT_MS:-4000}
+      - MEMORY_PALACE_RERANKER_URL=${MEMORY_PALACE_RERANKER_URL:-http://127.0.0.1:5022}
+      # Watch root syntax: user=/path|scope=memories|collection=obsidian,/path|scope=library|collection=genshin
+      - MEMORY_PALACE_WATCH_DIRS=${MEMORY_PALACE_WATCH_DIRS:-local=/home/src/data/obsidian|scope=memories|collection=obsidian,/home/src/data/library|scope=library|collection=library}
+    command: ["go", "run", "."]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  memory_palace_vol:
+    name: memory_palace_volume
