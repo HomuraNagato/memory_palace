@@ -1,106 +1,272 @@
 package main
 
 import (
-	"fmt"
+	"encoding/json"
 	"math"
+	"reflect"
 	"strings"
 	"testing"
 )
 
-func TestRetrievalSpecsForHybridIncludesExpandedSemanticQueries(t *testing.T) {
-	specs := retrievalSpecsFor("Niko's mother's name?", searchModeHybrid)
+func TestBuildRetrieveStageTraceKeepsActiveLaneOrders(t *testing.T) {
+	answer := CandidateSource{
+		ID:        "answer",
+		Title:     "Book",
+		Text:      "answer evidence",
+		SourceURI: "file:///book.epub",
+		Retrievals: []RetrievalHit{
+			{Route: "direct", Mode: searchModeHybrid, Rank: 5},
+			{Route: "direct", Mode: searchModeLiteral, Rank: 1},
+			{Route: "window", Mode: searchModeSemantic, Rank: 2},
+		},
+	}
+	denseFirst := CandidateSource{
+		ID:         "dense-first",
+		Retrievals: []RetrievalHit{{Route: "direct", Mode: searchModeHybrid, Rank: 1}},
+	}
+	hierarchy := CandidateSource{
+		ID:         "hierarchy",
+		Retrievals: []RetrievalHit{{Route: "parent", Mode: searchModeSemantic, Rank: 1, ParentPooledRank: 2, ParentSummaryRank: 1}},
+	}
+	conditionedAnswer := answer
+	conditionedAnswer.Retrievals = append(conditionedAnswer.Retrievals,
+		RetrievalHit{Route: "conditioned_literal", Mode: searchModeLiteral, Rank: 1},
+	)
 
-	if len(specs) != 6 {
-		t.Fatalf("expected 6 specs, got %#v", specs)
+	trace := buildRetrieveStageTrace(
+		[]CandidateSource{answer, denseFirst, hierarchy},
+		[]CandidateSource{hierarchy},
+		nil,
+		[]CandidateSource{conditionedAnswer},
+		[]CandidateSource{hierarchy, conditionedAnswer},
+		[]CandidateSource{answer, hierarchy},
+		[]CandidateSource{answer},
+	)
+
+	if len(trace.Candidates) != 3 {
+		t.Fatalf("expected deduplicated candidate catalog, got %#v", trace.Candidates)
 	}
-	if specs[0] != (RetrievalSpec{Query: "Niko's mother's name?", Mode: searchModeHybrid}) {
-		t.Fatalf("unexpected preferred spec: %#v", specs[0])
+	assertTraceStage(t, trace, "direct_hybrid", []string{"dense-first", "answer"})
+	assertTraceStage(t, trace, "direct_literal", []string{"answer"})
+	assertTraceStage(t, trace, "passage_windows", []string{"answer"})
+	assertTraceStage(t, trace, "hierarchy", []string{"hierarchy"})
+	assertTraceStage(t, trace, "hierarchy_pooled", []string{"hierarchy"})
+	assertTraceStage(t, trace, "hierarchy_summary", []string{"hierarchy"})
+	assertTraceStage(t, trace, "conditioned_literal", []string{"answer"})
+	assertTraceStage(t, trace, "global_matched", []string{"answer", "dense-first", "hierarchy"})
+	assertTraceStage(t, trace, "document_selection", []string{"hierarchy"})
+	assertTraceStage(t, trace, "rerank_pool", []string{"hierarchy", "answer"})
+	assertTraceStage(t, trace, "cross_encoder", []string{"answer", "hierarchy"})
+	assertTraceStage(t, trace, "final", []string{"answer"})
+}
+
+func TestRetrieveResponseOmitsDisabledStageTrace(t *testing.T) {
+	encoded, err := json.Marshal(RetrieveResponse{})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if specs[1] != (RetrievalSpec{Query: "niko mother", Mode: searchModeHybrid}) {
-		t.Fatalf("unexpected compact expansion: %#v", specs[1])
+	if strings.Contains(string(encoded), "stage_trace") {
+		t.Fatalf("disabled trace leaked into response: %s", encoded)
 	}
-	if specs[2] != (RetrievalSpec{Query: "mother of niko name", Mode: searchModeHybrid}) {
-		t.Fatalf("unexpected relationship expansion: %#v", specs[2])
+}
+
+func TestRetrievalSpecsUseGenericNormalizedAndLiteralQueries(t *testing.T) {
+	specs := retrievalSpecsFor("Niko's mother's name?", searchModeHybrid)
+	want := []RetrievalSpec{
+		{Query: "Niko's mother's name?", Mode: searchModeHybrid},
+		{Query: "Niko mother name", Mode: searchModeLiteral},
 	}
-	if specs[3] != (RetrievalSpec{Query: "mother mum mom of niko name", Mode: searchModeHybrid}) {
-		t.Fatalf("unexpected relationship vocabulary expansion: %#v", specs[3])
+	if len(specs) != len(want) {
+		t.Fatalf("expected %d specs, got %#v", len(want), specs)
 	}
-	if specs[4] != (RetrievalSpec{Query: "Niko mother name", Mode: searchModeLiteral}) {
-		t.Fatalf("unexpected literal spec: %#v", specs[4])
+	for index := range want {
+		if specs[index] != want[index] {
+			t.Fatalf("spec %d = %#v, want %#v", index, specs[index], want[index])
+		}
 	}
-	if specs[5] != (RetrievalSpec{Query: "mother mum mom niko name", Mode: searchModeLiteral}) {
-		t.Fatalf("unexpected literal relationship vocabulary spec: %#v", specs[5])
+}
+
+func TestAssembleRerankPoolReservesConditionedAndGlobalCandidates(t *testing.T) {
+	global := []CandidateSource{
+		{ID: "a-global", MemoryID: "a", RetrievalScore: 1, ChunkMetadata: map[string]any{}},
+		{ID: "outside", MemoryID: "outside", RetrievalScore: 0.9, ChunkMetadata: map[string]any{}},
+	}
+	conditioned := []CandidateSource{
+		{
+			ID:             "a-answer",
+			MemoryID:       "a",
+			RetrievalScore: reciprocalRankScore(1),
+			Retrievals:     []RetrievalHit{{Route: "conditioned_dense", Rank: 1, FusionScore: reciprocalRankScore(1)}},
+			ChunkMetadata:  map[string]any{},
+		},
+		{
+			ID:             "b-answer",
+			MemoryID:       "b",
+			RetrievalScore: reciprocalRankScore(1),
+			Retrievals:     []RetrievalHit{{Route: "conditioned_literal", Rank: 1, FusionScore: reciprocalRankScore(1)}},
+			ChunkMetadata:  map[string]any{},
+		},
+	}
+	documents := []firstPhaseDocument{
+		{memoryID: "a", score: 1},
+		{memoryID: "b", score: 0.8},
+	}
+
+	selected := assembleRerankPool(global, conditioned, documents, 4)
+	for _, id := range []string{"a-answer", "b-answer", "outside"} {
+		if !containsCandidate(selected, id) {
+			t.Fatalf("expected %q in bounded pool, got %#v", id, selected)
+		}
+	}
+	if len(selected) != 4 {
+		t.Fatalf("expected full pool of 4, got %d", len(selected))
+	}
+}
+
+func TestAssembleRerankPoolAddsQuarterConditionedCandidates(t *testing.T) {
+	documents := []firstPhaseDocument{{memoryID: "a", score: 1}, {memoryID: "b", score: 0.9}}
+	global := make([]CandidateSource, 0, 8)
+	conditioned := make([]CandidateSource, 0, 8)
+	for index := 0; index < 8; index++ {
+		global = append(global, CandidateSource{
+			ID:             "g-" + string(rune('a'+index)),
+			MemoryID:       "global",
+			RetrievalScore: 1 - float64(index)/100,
+			ChunkMetadata:  map[string]any{},
+		})
+		memoryID := "a"
+		if index%2 == 1 {
+			memoryID = "b"
+		}
+		conditioned = append(conditioned, CandidateSource{
+			ID:             "c-" + string(rune('a'+index)),
+			MemoryID:       memoryID,
+			RetrievalScore: 1 - float64(index)/100,
+			Retrievals:     []RetrievalHit{{Route: "conditioned_dense", Rank: index/2 + 1, FusionScore: reciprocalRankScore(index/2 + 1)}},
+			ChunkMetadata:  map[string]any{},
+		})
+	}
+
+	selected := assembleRerankPool(global, conditioned, documents, 8)
+	conditionedCount := 0
+	globalCount := 0
+	for _, candidate := range selected {
+		if strings.HasPrefix(candidate.ID, "g") {
+			globalCount++
+		} else {
+			conditionedCount++
+		}
+	}
+	if conditionedCount != 2 || globalCount != 6 {
+		t.Fatalf("expected 2 conditioned and 6 global candidates, got %d and %d", conditionedCount, globalCount)
+	}
+}
+
+func TestAdaptiveConditionedBudgetsFollowDocumentConfidence(t *testing.T) {
+	documents := []firstPhaseDocument{
+		{memoryID: "a", score: 1},
+		{memoryID: "b", score: 0.5},
+		{memoryID: "c", score: 0.5},
+		{memoryID: "d", score: 0.25},
+	}
+	budgets := adaptiveConditionedBudgets(documents, 12, 8)
+	want := []conditionedDocumentBudget{
+		{MemoryID: "a", Limit: 7},
+		{MemoryID: "b", Limit: 2},
+		{MemoryID: "c", Limit: 2},
+		{MemoryID: "d", Limit: 1},
+	}
+	if !reflect.DeepEqual(budgets, want) {
+		t.Fatalf("budgets = %#v, want %#v", budgets, want)
+	}
+}
+
+func TestAdaptiveConditionedBudgetsRemainBroadWhenScoresAreEven(t *testing.T) {
+	documents := []firstPhaseDocument{
+		{memoryID: "a", score: 1},
+		{memoryID: "b", score: 1},
+		{memoryID: "c", score: 1},
+		{memoryID: "d", score: 1},
+	}
+	budgets := adaptiveConditionedBudgets(documents, 12, 8)
+	for _, budget := range budgets {
+		if budget.Limit != 3 {
+			t.Fatalf("expected even depth allocation, got %#v", budgets)
+		}
+	}
+}
+
+func TestMergeDocumentRoutesReservesTwoUniqueRootDocuments(t *testing.T) {
+	passages := make([]firstPhaseDocument, 0, 9)
+	for index := 0; index < 9; index++ {
+		passages = append(passages, firstPhaseDocument{
+			memoryID:   "passage-" + string(rune('a'+index)),
+			score:      1 - float64(index)/10,
+			candidates: []CandidateSource{{ID: "candidate-" + string(rune('a'+index))}},
+		})
+	}
+	roots := []documentRootHit{
+		{MemoryID: "passage-a", Rank: 1, Similarity: 0.9, Passages: 12},
+		{MemoryID: "root-only", Rank: 2, Similarity: 0.8, Passages: 3},
+		{MemoryID: "passage-h", Rank: 3, Similarity: 0.7, Passages: 8},
+	}
+
+	selected := mergeDocumentRoutes(passages, roots, 8)
+	if len(selected) != 8 {
+		t.Fatalf("expected 8 selected documents, got %#v", selected)
+	}
+	for index, memoryID := range []string{"passage-a", "passage-b", "passage-c", "passage-d", "passage-e", "passage-f", "root-only", "passage-h"} {
+		if selected[index].memoryID != memoryID {
+			t.Fatalf("selected[%d] = %q, want %q", index, selected[index].memoryID, memoryID)
+		}
+	}
+	if selected[0].rootRouted {
+		t.Fatal("a duplicate root hit already selected by passages must not consume root reserve")
+	}
+	if !selected[6].rootRouted || !selected[7].rootRouted {
+		t.Fatalf("expected reserved roots to be marked, got %#v", selected)
+	}
+}
+
+func TestAdaptiveConditionedBudgetsGiveRootRoutesBoundedInitialDepth(t *testing.T) {
+	documents := []firstPhaseDocument{
+		{memoryID: "passage", score: 1},
+		{memoryID: "short-root", score: 0.8, rootRouted: true, passageCount: 3},
+		{memoryID: "long-root", score: 0.7, rootRouted: true, passageCount: 20},
+	}
+	budgets := adaptiveConditionedBudgets(documents, 12, 8)
+	if budgets[1].Limit < 3 || budgets[2].Limit < 6 {
+		t.Fatalf("expected root-routed initial depths of 3 and 6, got %#v", budgets)
+	}
+	total := 0
+	for _, budget := range budgets {
+		total += budget.Limit
+	}
+	if total != 12 {
+		t.Fatalf("expected exact total budget 12, got %d from %#v", total, budgets)
+	}
+}
+
+func TestFilterConditionedResultsUsesPerDocumentDepth(t *testing.T) {
+	results := []SearchResult{
+		{MemoryID: "a", ChunkID: "a1", ChunkMetadata: map[string]any{"conditioned_rank": 1}},
+		{MemoryID: "a", ChunkID: "a2", ChunkMetadata: map[string]any{"conditioned_rank": 2}},
+		{MemoryID: "b", ChunkID: "b1", ChunkMetadata: map[string]any{"conditioned_rank": 1}},
+		{MemoryID: "b", ChunkID: "b2", ChunkMetadata: map[string]any{"conditioned_rank": 2}},
+	}
+	filtered := filterConditionedResults(results, []conditionedDocumentBudget{
+		{MemoryID: "a", Limit: 2},
+		{MemoryID: "b", Limit: 1},
+	})
+	if len(filtered) != 3 || filtered[2].ChunkID != "b1" {
+		t.Fatalf("unexpected filtered results: %#v", filtered)
 	}
 }
 
 func TestRetrievalSpecsForLiteralUsesSingleNormalizedQuery(t *testing.T) {
 	specs := retrievalSpecsFor("Niko's mother's name?", searchModeLiteral)
-
-	if len(specs) != 1 {
-		t.Fatalf("expected 1 spec, got %#v", specs)
-	}
-	if specs[0] != (RetrievalSpec{Query: "Niko mother name", Mode: searchModeLiteral}) {
-		t.Fatalf("unexpected literal spec: %#v", specs[0])
-	}
-}
-
-func TestRescueLiteralRetrieveSourcesKeepsStrongLiteralHit(t *testing.T) {
-	selected := []CandidateSource{
-		{ID: "semantic-1"},
-		{ID: "semantic-2"},
-		{ID: "semantic-3"},
-	}
-	candidates := []CandidateSource{
-		{
-			ID:   "literal-answer",
-			Text: "This chunk contains the answer name directly.",
-			Retrievals: []RetrievalHit{
-				{LiteralScore: 0.72},
-			},
-		},
-	}
-
-	result := rescueLiteralRetrieveSources("answer name", selected, candidates, 3, 1, 0.65)
-
-	if len(result) != 3 {
-		t.Fatalf("expected result to stay at limit, got %d", len(result))
-	}
-	if result[2].ID != "literal-answer" {
-		t.Fatalf("expected weak tail source to be replaced by literal hit, got %#v", result)
-	}
-}
-
-func TestRescueLiteralRetrieveSourcesIgnoresWeakLiteralHit(t *testing.T) {
-	selected := []CandidateSource{
-		{ID: "semantic-1"},
-		{ID: "semantic-2"},
-	}
-	candidates := []CandidateSource{
-		{
-			ID: "weak-literal",
-			Retrievals: []RetrievalHit{
-				{LiteralScore: 0.40},
-			},
-		},
-	}
-
-	result := rescueLiteralRetrieveSources("answer name", selected, candidates, 2, 1, 0.65)
-
-	if result[1].ID != "semantic-2" {
-		t.Fatalf("expected weak literal hit to be ignored, got %#v", result)
-	}
-}
-
-func TestRescueLiteralRetrieveSourcesKeepsMultipleHits(t *testing.T) {
-	selected := []CandidateSource{{ID: "semantic-1"}, {ID: "semantic-2"}, {ID: "semantic-3"}, {ID: "semantic-4"}}
-	candidates := []CandidateSource{
-		{ID: "name", Text: "Mum's name is recorded here.", Retrievals: []RetrievalHit{{LiteralScore: 2}}},
-		{ID: "relation", Text: "Her mother appears here.", Retrievals: []RetrievalHit{{LiteralScore: 1}}},
-	}
-
-	result := rescueLiteralRetrieveSources("What is her mother's name?", selected, candidates, 4, 2, 0.65)
-	if !containsCandidate(result, "name") || !containsCandidate(result, "relation") {
-		t.Fatalf("expected both rescue passages to survive, got %#v", result)
+	if len(specs) != 1 || specs[0] != (RetrievalSpec{Query: "Niko mother name", Mode: searchModeLiteral}) {
+		t.Fatalf("unexpected literal specs: %#v", specs)
 	}
 }
 
@@ -121,196 +287,185 @@ func TestAddRetrieveCandidatesAccumulatesReciprocalRanks(t *testing.T) {
 	}
 }
 
-func TestAddRetrieveCandidatesUsesParentAndChildRanks(t *testing.T) {
+func TestAddRetrieveCandidatesCollapsesWindowAndLeafHits(t *testing.T) {
 	candidates := map[string]*CandidateSource{}
-	result := SearchResult{
-		MemoryID: "memory",
-		ChunkID:  "chunk",
-		Title:    "Title",
-		Text:     "Evidence",
-		ChunkMetadata: map[string]any{
-			"parent_rank":         13,
-			"child_rank":          5,
-			"parent_similarity":   0.5,
-			"parent_fusion_score": reciprocalRankScore(20) + reciprocalRankScore(21),
+	spec := RetrievalSpec{Query: "question", Mode: searchModeSemantic}
+	direct := SearchResult{MemoryID: "memory", ChunkID: "chunk", Title: "Title", Text: "Evidence"}
+	window := direct
+	window.RerankContext = "Surrounding context with Evidence in the middle."
+
+	addRetrieveCandidates(candidates, []SearchResult{direct}, spec, "direct")
+	addRetrieveCandidates(candidates, []SearchResult{window}, spec, "window")
+
+	if len(candidates) != 1 {
+		t.Fatalf("expected one canonical leaf, got %#v", candidates)
+	}
+	got := candidates["memory:chunk"]
+	if got == nil || len(got.Retrievals) != 2 {
+		t.Fatalf("expected merged retrieval signals, got %#v", got)
+	}
+	if got.RerankContext != window.RerankContext {
+		t.Fatalf("expected window context to survive deduplication, got %q", got.RerankContext)
+	}
+}
+
+func TestRankFirstPhaseCandidatesPreservesComplementaryFeatures(t *testing.T) {
+	candidates := []CandidateSource{
+		{
+			ID:             "dense-only",
+			MemoryID:       "a",
+			RetrievalScore: 0.02,
+			Retrievals: []RetrievalHit{{
+				Route: "direct", Mode: searchModeSemantic, VectorSimilarity: 0.9,
+			}},
+		},
+		{
+			ID:             "supported",
+			MemoryID:       "b",
+			RetrievalScore: 0.03,
+			Retrievals: []RetrievalHit{
+				{Route: "direct", Mode: searchModeSemantic, VectorSimilarity: 0.75},
+				{Route: "direct", Mode: searchModeLiteral, LiteralScore: 4},
+				{Route: "parent", Mode: searchModeSemantic, FusionScore: 0.02},
+			},
 		},
 	}
-	spec := RetrievalSpec{Query: "question", Mode: searchModeSemantic}
-	addRetrieveCandidates(candidates, []SearchResult{result}, spec, "parent")
-
-	got := candidates["memory:chunk"]
-	want := 0.5*(reciprocalRankScore(20)+reciprocalRankScore(21)) + 0.5*reciprocalRankScore(5)
-	if got == nil || math.Abs(got.RetrievalScore-want) > 0.0000001 {
-		t.Fatalf("expected hierarchical score %f, got %#v", want, got)
+	ranked := rankFirstPhaseCandidates(candidates, nil)
+	if ranked[0].ID != "supported" {
+		t.Fatalf("expected complementary evidence first, got %#v", ranked)
 	}
-	hit := got.Retrievals[0]
-	if hit.ParentRank != 13 || hit.ChildRank != 5 || hit.ParentSimilarity != 0.5 {
-		t.Fatalf("expected hierarchy diagnostics, got %#v", hit)
+	features := ranked[0].FirstPhase
+	if features == nil || features.LiteralScore != 4 || features.HierarchyScore != 0.02 || features.RouteSupport != 3 {
+		t.Fatalf("first-phase features were not preserved: %#v", features)
 	}
 }
 
-func TestHierarchyRerankOverridesParentChildFusion(t *testing.T) {
-	result := SearchResult{ChunkMetadata: map[string]any{
-		"hierarchy_rerank_rank": 2,
-		"parent_fusion_score":   reciprocalRankScore(1),
-		"child_rank":            8,
-	}}
-
-	if got, want := hierarchicalFusionScore(result), reciprocalRankScore(2); math.Abs(got-want) > 0.0000001 {
-		t.Fatalf("expected hierarchy rerank score %f, got %f", want, got)
+func TestRankFirstPhaseCandidatesUsesDocumentEvidence(t *testing.T) {
+	candidates := []CandidateSource{
+		{ID: "a", MemoryID: "a", RetrievalScore: 1, Retrievals: []RetrievalHit{{Route: "direct", Mode: searchModeSemantic, VectorSimilarity: 0.7}}},
+		{ID: "b", MemoryID: "b", RetrievalScore: 1, Retrievals: []RetrievalHit{{Route: "direct", Mode: searchModeSemantic, VectorSimilarity: 0.7}}},
+	}
+	documents := []firstPhaseDocument{{memoryID: "b", score: 1}, {memoryID: "a", score: 0.5}}
+	ranked := rankFirstPhaseCandidates(candidates, documents)
+	if ranked[0].ID != "b" || ranked[0].FirstPhase.DocumentScore != 1 {
+		t.Fatalf("expected stronger document evidence first, got %#v", ranked)
 	}
 }
 
-func TestFilterQueryEchoSourcesRemovesQuestionOnlyDocument(t *testing.T) {
-	sources := []CandidateSource{
-		{ID: "echo", Text: "Who designed the lunar observatory?"},
-		{ID: "answer", Text: "Mira Patel designed the lunar observatory."},
-	}
-
-	filtered := filterQueryEchoSources("who designed the lunar observatory", sources)
-	if len(filtered) != 1 || filtered[0].ID != "answer" {
-		t.Fatalf("expected only answer evidence, got %#v", filtered)
-	}
-}
-
-func TestRerankTextPlacesOriginalEvidenceFirst(t *testing.T) {
-	source := CandidateSource{
-		Text:          "answer evidence",
-		ContextText:   "context",
-		ParentSummary: "summary",
-		MetadataText:  "metadata",
-	}
-
-	text := source.rerankText()
-	if !strings.HasPrefix(text, "Original chunk with local context:\nanswer evidence") {
-		t.Fatalf("expected original evidence first, got %q", text)
-	}
-}
-
-func TestRerankTextPrefersLocalWindow(t *testing.T) {
-	source := CandidateSource{Text: "isolated sentence", RerankContext: "neighbor context\nanswer sentence"}
-	text := source.rerankText()
-	if !strings.Contains(text, "neighbor context\nanswer sentence") || strings.Contains(text, "isolated sentence") {
-		t.Fatalf("expected reranker-local context, got %q", text)
-	}
-}
-
-func TestFuseRetrieveAndRerankOrdersRewardsAgreement(t *testing.T) {
-	retrieved := []CandidateSource{{ID: "evidence"}, {ID: "retrieval-only"}, {ID: "shared"}}
-	reranked := []CandidateSource{{ID: "shared"}, {ID: "rerank-only"}, {ID: "evidence"}}
-
-	result := fuseRetrieveAndRerankOrders(retrieved, reranked)
-	if len(result) != 4 || !((result[0].ID == "evidence" && result[1].ID == "shared") || (result[0].ID == "shared" && result[1].ID == "evidence")) {
-		t.Fatalf("expected candidates supported by both orders first, got %#v", result)
-	}
-}
-
-func TestFuseRetrieveAndRerankOrdersLetsRerankerCorrectRetrieval(t *testing.T) {
-	retrieved := make([]CandidateSource, 50)
-	reranked := make([]CandidateSource, 50)
-	for index := range retrieved {
-		retrieved[index] = CandidateSource{ID: fmt.Sprintf("candidate-%d", index)}
-		reranked[len(reranked)-1-index] = retrieved[index]
-	}
-
-	result := fuseRetrieveAndRerankOrders(retrieved, reranked)
-	if result[0].ID != "candidate-49" {
-		t.Fatalf("expected reranker to correct retrieval order, got %q", result[0].ID)
-	}
-}
-
-func TestSelectRerankCandidatesCapsAndDiversifiesChapters(t *testing.T) {
-	candidates := make([]CandidateSource, 0, 12)
-	for index := 0; index < 8; index++ {
-		candidates = append(candidates, CandidateSource{
-			ID:             fmt.Sprintf("same-%d", index),
-			MemoryID:       "book",
-			RetrievalScore: 1 - float64(index)/100,
-			ChunkMetadata:  map[string]any{"chapter": 1},
-		})
-	}
-	for index := 0; index < 4; index++ {
-		candidates = append(candidates, CandidateSource{
-			ID:             fmt.Sprintf("other-%d", index),
-			MemoryID:       "other-book",
-			RetrievalScore: 0.5 - float64(index)/100,
-			ChunkMetadata:  map[string]any{"chapter": index + 1},
-		})
-	}
-
-	selected := selectRerankCandidates(candidates, 8)
-	if len(selected) != 8 {
-		t.Fatalf("expected 8 candidates, got %d", len(selected))
-	}
-	sameChapter := 0
-	for _, candidate := range selected {
-		if candidate.MemoryID == "book" {
-			sameChapter++
-		}
-	}
-	if sameChapter > maxChunksPerChapter {
-		t.Fatalf("expected at most %d same-chapter candidates, got %d", maxChunksPerChapter, sameChapter)
-	}
-}
-
-func TestDeterministicQueryExpansionsIncludesRelationshipVocabulary(t *testing.T) {
-	expansions := deterministicQueryExpansions("What is El's mother's name?")
-	joined := strings.Join(expansions, "\n")
-	if !strings.Contains(joined, "mother mum mom of el name") {
-		t.Fatalf("expected general mother vocabulary expansion, got %q", expansions)
-	}
-}
-
-func TestHierarchicalFusionScoreUsesLexicalChildRank(t *testing.T) {
-	result := SearchResult{ChunkMetadata: map[string]any{
-		"parent_fusion_score": 0.02,
-		"parent_bm25_rank":    2,
-	}}
-	if score := hierarchicalFusionScore(result); score <= 0.01 {
-		t.Fatalf("expected lexical child rank to contribute to hierarchy score, got %f", score)
-	}
-}
-
-func TestSelectRerankCandidatesBalancesSourceLiteralLane(t *testing.T) {
-	candidates := make([]CandidateSource, 0, 60)
-	for source := 0; source < 3; source++ {
-		for rank := 0; rank < 20; rank++ {
+func TestSelectFirstPhaseCandidatesBalancesDocumentsAndGlobalRank(t *testing.T) {
+	candidates := make([]CandidateSource, 0, 24)
+	for document := 0; document < 3; document++ {
+		for chunk := 0; chunk < 8; chunk++ {
 			candidates = append(candidates, CandidateSource{
-				ID:             fmt.Sprintf("source-%d-%d", source, rank),
-				MemoryID:       fmt.Sprintf("source-%d", source),
-				RetrievalScore: 1 - float64(source*20+rank)/1000,
-				Retrievals: []RetrievalHit{{
-					Route:        "source_literal",
-					LiteralScore: float64(100 - rank),
-				}},
+				ID:             string(rune('a'+document)) + string(rune('0'+chunk)),
+				MemoryID:       string(rune('a' + document)),
+				RetrievalScore: 1 - float64(document*8+chunk)/100,
+				ChunkMetadata:  map[string]any{},
 			})
 		}
 	}
 
-	selected := selectRerankCandidates(candidates, 40)
+	selected := selectFirstPhaseCandidates(candidates, 12, retrievalPlanLookup)
+	if len(selected) != 12 {
+		t.Fatalf("expected 12 candidates, got %d", len(selected))
+	}
 	counts := map[string]int{}
 	for _, candidate := range selected {
 		counts[candidate.MemoryID]++
-	}
-	for source := 0; source < 3; source++ {
-		if count := counts[fmt.Sprintf("source-%d", source)]; count < 9 {
-			t.Fatalf("expected deep evidence from every identified source, got counts %#v", counts)
+		if _, ok := candidate.ChunkMetadata["first_phase_document_rank"]; !ok {
+			t.Fatalf("missing document rank on %#v", candidate)
 		}
+	}
+	for _, memoryID := range []string{"a", "b", "c"} {
+		if counts[memoryID] == 0 {
+			t.Fatalf("expected document %q to be represented, got %#v", memoryID, counts)
+		}
+	}
+}
+
+func TestCrossEncoderOrderRemainsAuthoritativeThroughDiversity(t *testing.T) {
+	reranked := []CandidateSource{
+		{ID: "a1", MemoryID: "a"},
+		{ID: "a2", MemoryID: "a"},
+		{ID: "b1", MemoryID: "b"},
+		{ID: "a3", MemoryID: "a"},
+	}
+	selected := diversifyRetrieveSources(reranked, 3, 2)
+	want := []string{"a1", "a2", "b1"}
+	for index, id := range want {
+		if selected[index].ID != id {
+			t.Fatalf("selected order = %#v, want %#v", selected, want)
+		}
+	}
+}
+
+func TestLookupPerMemoryLimitPreservesStrongSingleSourceEvidence(t *testing.T) {
+	tests := []struct {
+		sourceLimit int
+		want        int
+	}{
+		{sourceLimit: 3, want: 3},
+		{sourceLimit: 8, want: 6},
+		{sourceLimit: 12, want: 9},
+	}
+	for _, test := range tests {
+		if got := lookupPerMemoryLimit(test.sourceLimit); got != test.want {
+			t.Fatalf("lookupPerMemoryLimit(%d) = %d, want %d", test.sourceLimit, got, test.want)
+		}
+	}
+}
+
+func TestRetrievalPlanRecognizesOverviewQuestions(t *testing.T) {
+	if got := retrievalPlanForQuery("What is in chapter 1 of the probability textbook?"); got != retrievalPlanOverview {
+		t.Fatalf("expected overview plan, got %q", got)
+	}
+	if got := retrievalPlanForQuery("What is Niko's mother's name?"); got != retrievalPlanLookup {
+		t.Fatalf("expected lookup plan, got %q", got)
+	}
+}
+
+func TestSelectEvidenceSetPrefersDistinctStructuralNodes(t *testing.T) {
+	sources := []CandidateSource{
+		{ID: "a1", MemoryID: "book", ChunkID: "1", ChunkMetadata: map[string]any{"route_node_id": "chapter-a"}},
+		{ID: "a2", MemoryID: "book", ChunkID: "2", ChunkMetadata: map[string]any{"route_node_id": "chapter-a"}},
+		{ID: "b1", MemoryID: "book", ChunkID: "3", ChunkMetadata: map[string]any{"route_node_id": "chapter-b"}},
+	}
+	selected := selectEvidenceSet(sources, 2, 2)
+	if len(selected) != 2 || selected[0].ID != "a1" || selected[1].ID != "b1" {
+		t.Fatalf("expected one representative per structural node, got %#v", selected)
 	}
 }
 
 func TestCenteredEvidenceTextPreservesSelectedChunk(t *testing.T) {
 	chunks := []retrieveNearbyChunk{
 		{id: "before", label: "Chunk 1", text: strings.Repeat("before ", 200)},
-		{id: "selected", label: "Chunk 2", text: "Gwen Higgins is El's mother."},
+		{id: "selected", label: "Chunk 2", text: "Talia Voss is Niko's mother."},
 		{id: "after", label: "Chunk 3", text: strings.Repeat("after ", 200)},
 	}
-
 	evidence := centeredEvidenceText(chunks, 1, 300)
-	if !strings.Contains(evidence, "Gwen Higgins is El's mother.") {
+	if !strings.Contains(evidence, "Talia Voss is Niko's mother.") {
 		t.Fatalf("selected evidence was lost: %q", evidence)
 	}
 	if len([]rune(evidence)) > 306 {
 		t.Fatalf("evidence exceeded bounded context: %d", len([]rune(evidence)))
 	}
+}
+
+func assertTraceStage(t *testing.T, trace *RetrieveStageTrace, name string, want []string) {
+	t.Helper()
+	for _, stage := range trace.Stages {
+		if stage.Name != name {
+			continue
+		}
+		if len(stage.CandidateIDs) != len(want) {
+			t.Fatalf("%s = %#v, want %#v", name, stage.CandidateIDs, want)
+		}
+		for index := range want {
+			if stage.CandidateIDs[index] != want[index] {
+				t.Fatalf("%s = %#v, want %#v", name, stage.CandidateIDs, want)
+			}
+		}
+		return
+	}
+	t.Fatalf("missing trace stage %q", name)
 }

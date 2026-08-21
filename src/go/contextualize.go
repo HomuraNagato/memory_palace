@@ -50,8 +50,10 @@ func (s *Server) summarizeParentNodes(ctx context.Context, req UpsertMemoryReque
 		return 0, 0
 	}
 	targets := make([]int, 0, len(parents))
+	fileExt := strings.ToLower(strings.TrimSpace(stringMapValue(req.Metadata, "file_ext")))
+	structuredDocument := fileExt == ".pdf" || fileExt == ".epub"
 	for index, parent := range parents {
-		if parent.NodeType == "chapter" {
+		if parent.NodeType == "chapter" || (parent.NodeType == "document" && structuredDocument) {
 			targets = append(targets, index)
 		}
 	}
@@ -123,7 +125,7 @@ func (s *Server) summarizeParent(ctx context.Context, req UpsertMemoryRequest, p
 		return "", err
 	}
 	prompt := strings.Builder{}
-	prompt.WriteString("Write one concise, grounded summary of this chapter for future question answering.\n")
+	prompt.WriteString("Write one concise, grounded summary of this document section for future question answering.\n")
 	prompt.WriteString("Preserve important names, relationships, definitions, events, and answer-bearing facts.\n")
 	prompt.WriteString("Use only information explicitly present in the supplied text. Do not invent facts.\n")
 	prompt.WriteString("Return plain text only: one paragraph, no JSON, markdown, labels, or commentary.\n\n")
@@ -131,7 +133,7 @@ func (s *Server) summarizeParent(ctx context.Context, req UpsertMemoryRequest, p
 	prompt.WriteString(req.Title)
 	prompt.WriteString("\nSection: ")
 	prompt.WriteString(stringMapValue(parent.Metadata, "label"))
-	prompt.WriteString("\n\nChapter text:\n")
+	prompt.WriteString("\n\nSection text:\n")
 	prompt.WriteString(limitParentRunes(parent.Text, chapterSummaryMaxRunes))
 
 	body, err := json.Marshal(contextualizerRequest{

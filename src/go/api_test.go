@@ -2,11 +2,44 @@ package main
 
 import (
 	"archive/zip"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestFixedInstanceUserKeyOverridesRequestIdentity(t *testing.T) {
+	request, err := http.NewRequest(http.MethodGet, "http://memory.test/v1/memories?user_key=query-user", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("X-Memory-User-Key", "header-user")
+
+	if got := (&Server{instanceUserKey: "kimichuwu"}).userKeyFromRequest(request); got != "kimichuwu" {
+		t.Fatalf("fixed instance user = %q, want kimichuwu", got)
+	}
+	if got := (&Server{}).userKeyFromRequest(request); got != "header-user" {
+		t.Fatalf("request user = %q, want header-user", got)
+	}
+}
+
+func TestWatchDirsForInstanceKeepsOnlyFixedTenant(t *testing.T) {
+	watchDirs := map[string][]WatchRoot{
+		"garnetmoon": {{Path: "/data/garnetmoon"}},
+		"kimichuwu":  {{Path: "/data/kimichuwu"}},
+	}
+	filtered, err := watchDirsForInstance(watchDirs, "kimichuwu")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(filtered) != 1 || len(filtered["kimichuwu"]) != 1 || filtered["kimichuwu"][0].Path != "/data/kimichuwu" {
+		t.Fatalf("unexpected fixed watch roots: %#v", filtered)
+	}
+	if _, err := watchDirsForInstance(watchDirs, "unknown"); err == nil {
+		t.Fatal("expected mismatched fixed tenant to fail")
+	}
+}
 
 func TestExtractEPUBText(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "book.epub")
@@ -195,5 +228,22 @@ func TestIgnoredWatchDirectory(t *testing.T) {
 	}
 	if ignoredWatchDirectory("textbooks") {
 		t.Fatal("textbooks should remain watchable")
+	}
+}
+
+func TestWatchedSourceExistsDetectsMovedFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "memory.md")
+	if err := os.WriteFile(path, []byte("memory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sourceURI := "file://" + path
+	if !watchedSourceExists(sourceURI) {
+		t.Fatal("expected existing watched file")
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if watchedSourceExists(sourceURI) {
+		t.Fatal("expected removed watched file to be treated as a move candidate")
 	}
 }

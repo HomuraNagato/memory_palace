@@ -21,12 +21,13 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 	"unicode"
 
-	"github.com/lib/pq"
+	_ "github.com/lib/pq"
 )
 
 const (
@@ -35,8 +36,6 @@ const (
 	defaultEmbeddingModel      = "Qwen3-Embedding-0.6B"
 	defaultContextualizerURL   = "http://127.0.0.1:5014/v1/chat/completions"
 	defaultContextualizerModel = "auto"
-	defaultQueryRewriterURL    = "http://127.0.0.1:5014/v1/chat/completions"
-	defaultQueryRewriterModel  = "auto"
 	defaultRerankerURL         = "http://127.0.0.1:5022"
 	defaultHTTPAddr            = ":8013"
 	maxChunkRunes              = 700
@@ -44,8 +43,8 @@ const (
 	embeddingBatchSize         = 32
 	embeddingBatchTokenBudget  = 1200
 	embeddingMetadataRunes     = 500
-	rawEmbeddingBackfillBatch  = 32
 	libraryChunksPerDoc        = 6
+	literalTitleSeedChunks     = 3
 	contentHashVersion         = "memory-palace-retrieval-context-v19-separate-parent-vectors"
 	defaultMemoryScope         = "memories"
 	searchModeSemantic         = "semantic"
@@ -62,10 +61,11 @@ type Server struct {
 	contextualizerURL       string
 	contextualizerModel     string
 	contextualizerBatchSize int
-	queryRewriterURL        string
-	queryRewriterModel      string
-	queryRewriterTimeout    time.Duration
 	rerankerURL             string
+	summaryRoutingDisabled  bool
+	firstPhaseDisabled      bool
+	passageWindowsDisabled  bool
+	instanceUserKey         string
 	watchDirs               map[string][]WatchRoot
 	scanQueue               chan string
 	scanJobs                map[string]*ScanJob
@@ -153,6 +153,7 @@ type SearchResult struct {
 	Metadata      map[string]any `json:"metadata"`
 	ChunkMetadata map[string]any `json:"chunk_metadata"`
 	ParentSummary string         `json:"-"`
+	RerankContext string         `json:"-"`
 	Score         float64        `json:"score"`
 	ScoreParts    ScoreParts     `json:"score_parts"`
 	Similarity    float64        `json:"similarity"`
@@ -199,7 +200,6 @@ type SearchRequest struct {
 	TimeFilter          string    `json:"time_filter,omitempty"`
 	Tags                []string  `json:"tags,omitempty"`
 	ChunkLimitPerSource int       `json:"chunk_limit_per_source,omitempty"`
-	SourceTitles        []string  `json:"-"`
 	Embedding           []float64 `json:"-"`
 }
 
@@ -214,6 +214,7 @@ type RelatedMemoriesResponse struct {
 type WatchRunResponse struct {
 	Scanned    int `json:"scanned"`
 	Upserts    int `json:"upserts"`
+	Relocated  int `json:"relocated"`
 	Deleted    int `json:"deleted"`
 	Skipped    int `json:"skipped"`
 	Duplicates int `json:"duplicates"`
@@ -257,6 +258,11 @@ func main() {
 		log.Fatalf("migrate database: %v", err)
 	}
 
+	instanceUserKey := strings.TrimSpace(os.Getenv("MEMORY_PALACE_USER_KEY"))
+	watchDirs, err := watchDirsForInstance(parseWatchDirs(os.Getenv("MEMORY_PALACE_WATCH_DIRS")), instanceUserKey)
+	if err != nil {
+		log.Fatalf("configure watch directories: %v", err)
+	}
 	server := &Server{
 		db:                      db,
 		httpClient:              &http.Client{Timeout: 45 * time.Second},
@@ -266,11 +272,12 @@ func main() {
 		contextualizerURL:       envOrDefault("MEMORY_PALACE_CONTEXTUALIZER_URL", defaultContextualizerURL),
 		contextualizerModel:     envOrDefault("MEMORY_PALACE_CONTEXTUALIZER_MODEL", defaultContextualizerModel),
 		contextualizerBatchSize: parsePositiveInt(os.Getenv("MEMORY_PALACE_CONTEXTUALIZER_BATCH_SIZE"), 4),
-		queryRewriterURL:        envOrDefault("MEMORY_PALACE_QUERY_REWRITER_URL", defaultQueryRewriterURL),
-		queryRewriterModel:      envOrDefault("MEMORY_PALACE_QUERY_REWRITER_MODEL", defaultQueryRewriterModel),
-		queryRewriterTimeout:    time.Duration(parsePositiveInt(os.Getenv("MEMORY_PALACE_QUERY_REWRITER_TIMEOUT_MS"), 4000)) * time.Millisecond,
 		rerankerURL:             envOrDefault("MEMORY_PALACE_RERANKER_URL", defaultRerankerURL),
-		watchDirs:               parseWatchDirs(os.Getenv("MEMORY_PALACE_WATCH_DIRS")),
+		summaryRoutingDisabled:  parseBoolean(os.Getenv("MEMORY_PALACE_DISABLE_SUMMARY_ROUTING"), false),
+		firstPhaseDisabled:      parseBoolean(os.Getenv("MEMORY_PALACE_DISABLE_FIRST_PHASE_SCORING"), false),
+		passageWindowsDisabled:  parseBoolean(os.Getenv("MEMORY_PALACE_DISABLE_PASSAGE_WINDOWS"), false),
+		instanceUserKey:         instanceUserKey,
+		watchDirs:               watchDirs,
 		scanQueue:               make(chan string, 16),
 		scanJobs:                map[string]*ScanJob{},
 		retrieveTraces:          map[string]RetrieveTrace{},
@@ -284,7 +291,15 @@ func main() {
 		log.Fatalf("backfill parent entity context: %v", err)
 	}
 	go server.runScanWorker()
-	go server.backfillRawEmbeddings()
+	go func() {
+		time.Sleep(5 * time.Second)
+		logPassageWindowBackfillError(server.backfillPassageWindows(context.Background()))
+	}()
+	if instanceUserKey != "" {
+		log.Printf("memory.tenancy mode=fixed user=%q watch_roots=%d", instanceUserKey, len(watchDirs[instanceUserKey]))
+	} else {
+		log.Printf("memory.tenancy mode=request_key watch_users=%d", len(watchDirs))
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", server.handleHealth)
@@ -322,53 +337,55 @@ func migrate(db *sql.DB) error {
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			UNIQUE (user_key, source_type, source_uri)
 		)`,
-		`CREATE TABLE IF NOT EXISTS memory_chunks (
+		`CREATE TABLE IF NOT EXISTS memory_nodes (
 			id TEXT PRIMARY KEY,
 			memory_id TEXT NOT NULL REFERENCES memory_items(id) ON DELETE CASCADE,
 			user_key TEXT NOT NULL,
-			chunk_index INTEGER NOT NULL,
-			text TEXT NOT NULL,
-			context_text TEXT NOT NULL DEFAULT '',
-			metadata_text TEXT NOT NULL DEFAULT '',
-			parent_id TEXT,
-			embedding VECTOR(1024) NOT NULL,
-			raw_embedding VECTOR(1024),
-			metadata JSONB NOT NULL DEFAULT '{}'::JSONB,
-			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-			UNIQUE (memory_id, chunk_index)
-		)`,
-		`CREATE TABLE IF NOT EXISTS memory_parent_nodes (
-			id TEXT PRIMARY KEY,
-			memory_id TEXT NOT NULL REFERENCES memory_items(id) ON DELETE CASCADE,
-			user_key TEXT NOT NULL,
+			parent_node_id TEXT REFERENCES memory_nodes(id) ON DELETE CASCADE,
 			node_type TEXT NOT NULL,
 			node_key TEXT NOT NULL,
+			depth INTEGER NOT NULL,
+			ordinal INTEGER NOT NULL,
 			title TEXT NOT NULL DEFAULT '',
 			text TEXT NOT NULL DEFAULT '',
 			metadata_text TEXT NOT NULL DEFAULT '',
 			summary TEXT NOT NULL DEFAULT '',
 			embedding VECTOR(1024) NOT NULL,
 			summary_embedding VECTOR(1024),
-			child_count INTEGER NOT NULL DEFAULT 0,
+			passage_count INTEGER NOT NULL DEFAULT 0,
 			metadata JSONB NOT NULL DEFAULT '{}'::JSONB,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			UNIQUE (memory_id, node_type, node_key)
 		)`,
-		`CREATE TABLE IF NOT EXISTS memory_chunk_embeddings_3072 (
-			chunk_id TEXT NOT NULL REFERENCES memory_chunks(id) ON DELETE CASCADE,
+		`CREATE TABLE IF NOT EXISTS memory_chunks (
+			id TEXT PRIMARY KEY,
+			memory_id TEXT NOT NULL REFERENCES memory_items(id) ON DELETE CASCADE,
+			node_id TEXT NOT NULL REFERENCES memory_nodes(id) ON DELETE CASCADE,
 			user_key TEXT NOT NULL,
-			model_key TEXT NOT NULL,
-			model_name TEXT NOT NULL,
-			embedding HALFVEC(3072) NOT NULL,
+			chunk_index INTEGER NOT NULL,
+			text TEXT NOT NULL,
+			context_text TEXT NOT NULL DEFAULT '',
+			metadata_text TEXT NOT NULL DEFAULT '',
+			embedding VECTOR(1024) NOT NULL,
 			metadata JSONB NOT NULL DEFAULT '{}'::JSONB,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-			PRIMARY KEY (chunk_id, model_key)
+			UNIQUE (memory_id, chunk_index)
+		)`,
+		`CREATE TABLE IF NOT EXISTS memory_passage_windows (
+			id TEXT PRIMARY KEY,
+			memory_id TEXT NOT NULL REFERENCES memory_items(id) ON DELETE CASCADE,
+			node_id TEXT NOT NULL REFERENCES memory_nodes(id) ON DELETE CASCADE,
+			user_key TEXT NOT NULL,
+			window_index INTEGER NOT NULL,
+			start_chunk_index INTEGER NOT NULL,
+			end_chunk_index INTEGER NOT NULL,
+			text TEXT NOT NULL,
+			embedding VECTOR(1024) NOT NULL,
+			metadata JSONB NOT NULL DEFAULT '{}'::JSONB,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			UNIQUE (memory_id, window_index)
 		)`,
 		`ALTER TABLE memory_chunks ADD COLUMN IF NOT EXISTS context_text TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE memory_chunks ADD COLUMN IF NOT EXISTS parent_id TEXT`,
-		`ALTER TABLE memory_parent_nodes ADD COLUMN IF NOT EXISTS summary TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE memory_parent_nodes ADD COLUMN IF NOT EXISTS summary_embedding VECTOR(1024)`,
 		`DO $$
 		BEGIN
 			IF EXISTS (
@@ -382,7 +399,6 @@ func migrate(db *sql.DB) error {
 			END IF;
 		END $$`,
 		`ALTER TABLE memory_chunks ADD COLUMN IF NOT EXISTS metadata_text TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE memory_chunks ADD COLUMN IF NOT EXISTS raw_embedding VECTOR(1024)`,
 		`UPDATE memory_chunks SET metadata_text = text WHERE metadata_text = ''`,
 		`DO $$
 		BEGIN
@@ -412,14 +428,14 @@ func migrate(db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_memory_items_user_updated ON memory_items(user_key, updated_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_memory_items_source ON memory_items(user_key, source_type, source_uri)`,
 		`CREATE INDEX IF NOT EXISTS idx_memory_chunks_user ON memory_chunks(user_key)`,
-		`CREATE INDEX IF NOT EXISTS idx_memory_chunks_parent ON memory_chunks(user_key, parent_id, chunk_index)`,
-		`CREATE INDEX IF NOT EXISTS idx_memory_parent_nodes_user ON memory_parent_nodes(user_key, memory_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_memory_parent_nodes_embedding_hnsw_cosine ON memory_parent_nodes USING hnsw (embedding vector_cosine_ops)`,
-		`CREATE INDEX IF NOT EXISTS idx_memory_parent_nodes_summary_embedding_hnsw_cosine ON memory_parent_nodes USING hnsw (summary_embedding vector_cosine_ops)`,
+		`CREATE INDEX IF NOT EXISTS idx_memory_chunks_node ON memory_chunks(user_key, node_id, chunk_index)`,
+		`CREATE INDEX IF NOT EXISTS idx_memory_passage_windows_memory ON memory_passage_windows(user_key, memory_id, window_index)`,
+		`CREATE INDEX IF NOT EXISTS idx_memory_nodes_user ON memory_nodes(user_key, memory_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_memory_nodes_parent ON memory_nodes(user_key, parent_node_id, ordinal)`,
+		`CREATE INDEX IF NOT EXISTS idx_memory_nodes_embedding_hnsw_cosine ON memory_nodes USING hnsw (embedding vector_cosine_ops)`,
+		`CREATE INDEX IF NOT EXISTS idx_memory_nodes_summary_embedding_hnsw_cosine ON memory_nodes USING hnsw (summary_embedding vector_cosine_ops)`,
 		`CREATE INDEX IF NOT EXISTS idx_memory_chunks_embedding_hnsw_cosine ON memory_chunks USING hnsw (embedding vector_cosine_ops)`,
-		`CREATE INDEX IF NOT EXISTS idx_memory_chunks_raw_embedding_hnsw_cosine ON memory_chunks USING hnsw (raw_embedding vector_cosine_ops)`,
-		`CREATE INDEX IF NOT EXISTS idx_memory_chunk_embeddings_3072_user_model ON memory_chunk_embeddings_3072(user_key, model_key)`,
-		`CREATE INDEX IF NOT EXISTS idx_memory_chunk_embeddings_3072_hnsw_cosine ON memory_chunk_embeddings_3072 USING hnsw (embedding halfvec_cosine_ops)`,
+		`CREATE INDEX IF NOT EXISTS idx_memory_passage_windows_embedding_hnsw_cosine ON memory_passage_windows USING hnsw (embedding vector_cosine_ops)`,
 		`CREATE INDEX IF NOT EXISTS idx_memory_chunks_text_fts ON memory_chunks USING gin (to_tsvector('simple', text))`,
 		`CREATE INDEX IF NOT EXISTS idx_memory_chunks_metadata_text_fts ON memory_chunks USING gin (to_tsvector('simple', metadata_text))`,
 		`CREATE INDEX IF NOT EXISTS idx_memory_items_title_fts ON memory_items USING gin (to_tsvector('simple', title))`,
@@ -438,9 +454,14 @@ func migrate(db *sql.DB) error {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
+	tenantMode := "request_key"
+	if s.instanceUserKey != "" {
+		tenantMode = "fixed"
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":              true,
 		"embedding_model": s.embeddingModel,
+		"tenant_mode":     tenantMode,
 		"watch_users":     len(s.watchDirs),
 	})
 }
@@ -458,7 +479,7 @@ func (s *Server) handleLegacyQuery(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	results, err := s.search(r.Context(), userKeyFromRequest(r), SearchRequest{Query: req.Query, Limit: req.Limit})
+	results, err := s.search(r.Context(), s.userKeyFromRequest(r), SearchRequest{Query: req.Query, Limit: req.Limit})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -476,7 +497,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	results, err := s.search(r.Context(), userKeyFromRequest(r), req)
+	results, err := s.search(r.Context(), s.userKeyFromRequest(r), req)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -487,7 +508,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleMemories(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		userKey := userKeyFromRequest(r)
+		userKey := s.userKeyFromRequest(r)
 		query := strings.TrimSpace(r.URL.Query().Get("query"))
 		if query != "" {
 			limit := parseLimit(r.URL.Query().Get("limit"), 20)
@@ -520,7 +541,7 @@ func (s *Server) handleMemories(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		item, err := s.upsertMemory(r.Context(), userKeyFromRequest(r), req)
+		item, err := s.upsertMemory(r.Context(), s.userKeyFromRequest(r), req)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -539,7 +560,7 @@ func (s *Server) handleMemory(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "memory id required")
 		return
 	}
-	userKey := userKeyFromRequest(r)
+	userKey := s.userKeyFromRequest(r)
 	if len(parts) > 1 && parts[1] == "related" {
 		if r.Method != http.MethodGet {
 			writeError(w, http.StatusMethodNotAllowed, "GET required")
@@ -621,7 +642,7 @@ func (s *Server) handleWatchRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "POST required")
 		return
 	}
-	userKey := userKeyFromRequest(r)
+	userKey := s.userKeyFromRequest(r)
 	response, err := s.runWatchDirs(r.Context(), userKey)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -635,7 +656,7 @@ func (s *Server) handleWatchJobs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "POST required")
 		return
 	}
-	userKey := userKeyFromRequest(r)
+	userKey := s.userKeyFromRequest(r)
 	if strings.TrimSpace(userKey) == "" {
 		writeError(w, http.StatusBadRequest, "user key is required")
 		return
@@ -722,17 +743,15 @@ func (s *Server) upsertMemoryWithID(ctx context.Context, userKey, id string, req
 	contextStart := time.Now()
 	contextMetadata := fallbackContextMetadata(req, chunks)
 	contextMs := time.Since(contextStart).Milliseconds()
-	embeddingInputs := make([]string, 0, len(chunks)*2)
+	embeddingInputs := make([]string, 0, len(chunks))
 	contextTexts := make([]string, len(chunks))
 	metadataTexts := make([]string, len(chunks))
 	parentNodes, chunkParentIDs := buildParentNodes(req, chunks)
+	passageWindows := buildPassageWindows(chunks, chunkParentIDs)
 	for i, chunk := range chunks {
 		contextTexts[i] = chunkContextText(req, chunk, i)
 		metadataTexts[i] = metadataTextForChunk(req, chunk, i, contextTexts[i], contextMetadata[i])
 		embeddingInputs = append(embeddingInputs, embeddingTextForChunk(metadataTexts[i], chunk.Text))
-	}
-	for _, chunk := range chunks {
-		embeddingInputs = append(embeddingInputs, rawEmbeddingInput(chunk.Text))
 	}
 	embedStart := time.Now()
 	embeddings, err := s.embedBatched(ctx, embeddingInputs)
@@ -740,10 +759,26 @@ func (s *Server) upsertMemoryWithID(ctx context.Context, userKey, id string, req
 	if err != nil {
 		return MemoryItem{}, err
 	}
-	if len(embeddings) != len(chunks)*2 {
-		return MemoryItem{}, fmt.Errorf("embedding count mismatch: got %d want %d", len(embeddings), len(chunks)*2)
+	if len(embeddings) != len(chunks) {
+		return MemoryItem{}, fmt.Errorf("embedding count mismatch: got %d want %d", len(embeddings), len(chunks))
 	}
 	assignParentEmbeddings(parentNodes, embeddings[:len(chunks)])
+	windowEmbedStart := time.Now()
+	windowEmbeddingInputs := make([]string, len(passageWindows))
+	for index := range passageWindows {
+		windowEmbeddingInputs[index] = passageWindowEmbeddingText(req.Title, req.SourceURI, passageWindows[index].Text)
+	}
+	windowEmbeddings := [][]float64{}
+	if len(windowEmbeddingInputs) > 0 {
+		windowEmbeddings, err = s.embedBatched(ctx, windowEmbeddingInputs)
+	}
+	windowEmbedMs := time.Since(windowEmbedStart).Milliseconds()
+	if err != nil {
+		return MemoryItem{}, err
+	}
+	if err := assignPassageWindowEmbeddings(passageWindows, windowEmbeddings); err != nil {
+		return MemoryItem{}, err
+	}
 	summaryStart := time.Now()
 	parentSummaryCount, parentSummaryFallbacks := s.summarizeParentNodes(ctx, req, parentNodes)
 	parentSummaryEmbeddings := s.embedParentSummaries(ctx, parentNodes)
@@ -801,7 +836,10 @@ func (s *Server) upsertMemoryWithID(ctx context.Context, userKey, id string, req
 	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_chunks WHERE memory_id = $1 AND user_key = $2`, id, userKey); err != nil {
 		return MemoryItem{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_parent_nodes WHERE memory_id = $1 AND user_key = $2`, id, userKey); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_passage_windows WHERE memory_id = $1 AND user_key = $2`, id, userKey); err != nil {
+		return MemoryItem{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_nodes WHERE memory_id = $1 AND user_key = $2`, id, userKey); err != nil {
 		return MemoryItem{}, err
 	}
 	for _, parent := range parentNodes {
@@ -810,9 +848,9 @@ func (s *Server) upsertMemoryWithID(ctx context.Context, userKey, id string, req
 			return MemoryItem{}, err
 		}
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO memory_parent_nodes (id, memory_id, user_key, node_type, node_key, title, text, metadata_text, summary, embedding, summary_embedding, child_count, metadata, created_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::vector, $11::vector, $12, $13::jsonb, NOW())
-		`, parent.ID, id, userKey, parent.NodeType, parent.NodeKey, req.Title, parent.Text, parent.MetadataText, parent.Summary, vectorLiteral(parent.Embedding), nullableVectorLiteral(parent.SummaryEmbedding), len(parent.ChunkIndexes), string(parentMetadataJSON)); err != nil {
+			INSERT INTO memory_nodes (id, memory_id, user_key, parent_node_id, node_type, node_key, depth, ordinal, title, text, metadata_text, summary, embedding, summary_embedding, passage_count, metadata, created_at)
+			VALUES ($1, $2, $3, NULLIF($4, ''), $5, $6, $7, $8, $9, $10, $11, $12, $13::vector, $14::vector, $15, $16::jsonb, NOW())
+		`, parent.ID, id, userKey, parent.ParentID, parent.NodeType, parent.NodeKey, parent.Depth, parent.Ordinal, req.Title, parent.Text, parent.MetadataText, parent.Summary, vectorLiteral(parent.Embedding), nullableVectorLiteral(parent.SummaryEmbedding), len(parent.ChunkIndexes), string(parentMetadataJSON)); err != nil {
 			return MemoryItem{}, err
 		}
 	}
@@ -822,11 +860,14 @@ func (s *Server) upsertMemoryWithID(ctx context.Context, userKey, id string, req
 			return MemoryItem{}, err
 		}
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO memory_chunks (id, memory_id, user_key, chunk_index, text, context_text, metadata_text, parent_id, embedding, raw_embedding, metadata, created_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::vector, $10::vector, $11::jsonb, NOW())
-		`, newID(), id, userKey, i, chunk.Text, contextTexts[i], metadataTexts[i], chunkParentIDs[i], vectorLiteral(embeddings[i]), vectorLiteral(embeddings[len(chunks)+i]), string(chunkMetadataJSON)); err != nil {
+				INSERT INTO memory_chunks (id, memory_id, user_key, chunk_index, text, context_text, metadata_text, node_id, embedding, metadata, created_at)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::vector, $10::jsonb, NOW())
+			`, newID(), id, userKey, i, chunk.Text, contextTexts[i], metadataTexts[i], chunkParentIDs[i], vectorLiteral(embeddings[i]), string(chunkMetadataJSON)); err != nil {
 			return MemoryItem{}, err
 		}
+	}
+	if err := insertPassageWindows(ctx, tx, id, userKey, passageWindows); err != nil {
+		return MemoryItem{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return MemoryItem{}, err
@@ -837,7 +878,7 @@ func (s *Server) upsertMemoryWithID(ctx context.Context, userKey, id string, req
 		}
 	}
 	if logIngestProgress {
-		log.Printf("memory.upsert status=ok user=%q title=%q source_uri=%q chunks=%d parent_summaries=%d parent_summary_fallbacks=%d contextualize_ms=%d embed_ms=%d summary_ms=%d db_ms=%d total_ms=%d", userKey, req.Title, req.SourceURI, len(chunks), parentSummaryCount, parentSummaryFallbacks, contextMs, embedMs, summaryMs, time.Since(dbStart).Milliseconds(), time.Since(totalStart).Milliseconds())
+		log.Printf("memory.upsert status=ok user=%q title=%q source_uri=%q chunks=%d passage_windows=%d parent_summaries=%d parent_summary_fallbacks=%d contextualize_ms=%d embed_ms=%d window_embed_ms=%d summary_ms=%d db_ms=%d total_ms=%d", userKey, req.Title, req.SourceURI, len(chunks), len(passageWindows), parentSummaryCount, parentSummaryFallbacks, contextMs, embedMs, windowEmbedMs, summaryMs, time.Since(dbStart).Milliseconds(), time.Since(totalStart).Milliseconds())
 	}
 	return s.getMemory(ctx, userKey, id)
 }
@@ -849,78 +890,6 @@ func (s *Server) getMemory(ctx context.Context, userKey, id string) (MemoryItem,
 		WHERE user_key = $1 AND id = $2
 	`, userKey, id)
 	return scanMemoryItem(row)
-}
-
-type rawEmbeddingChunk struct {
-	ID   string
-	Text string
-}
-
-func (s *Server) backfillRawEmbeddings() {
-	start := time.Now()
-	processed := 0
-	log.Printf("memory.raw_embedding_backfill status=start batch=%d", rawEmbeddingBackfillBatch)
-	for {
-		rows, err := s.db.QueryContext(context.Background(), `
-			SELECT id, text
-			FROM memory_chunks
-			WHERE raw_embedding IS NULL
-			ORDER BY id
-			LIMIT $1
-		`, rawEmbeddingBackfillBatch)
-		if err != nil {
-			log.Printf("memory.raw_embedding_backfill status=error phase=load processed=%d err=%q", processed, err.Error())
-			return
-		}
-		chunks := make([]rawEmbeddingChunk, 0, rawEmbeddingBackfillBatch)
-		for rows.Next() {
-			var chunk rawEmbeddingChunk
-			if err := rows.Scan(&chunk.ID, &chunk.Text); err != nil {
-				rows.Close()
-				log.Printf("memory.raw_embedding_backfill status=error phase=scan processed=%d err=%q", processed, err.Error())
-				return
-			}
-			chunks = append(chunks, chunk)
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			log.Printf("memory.raw_embedding_backfill status=error phase=rows processed=%d err=%q", processed, err.Error())
-			return
-		}
-		rows.Close()
-		if len(chunks) == 0 {
-			log.Printf("memory.raw_embedding_backfill status=done processed=%d total_ms=%d", processed, time.Since(start).Milliseconds())
-			return
-		}
-
-		inputs := make([]string, len(chunks))
-		for i, chunk := range chunks {
-			inputs[i] = rawEmbeddingInput(chunk.Text)
-		}
-		embeddings, err := s.embedBatched(context.Background(), inputs)
-		if err != nil {
-			log.Printf("memory.raw_embedding_backfill status=error phase=embedding processed=%d batch=%d err=%q", processed, len(chunks), err.Error())
-			return
-		}
-		if len(embeddings) != len(chunks) {
-			log.Printf("memory.raw_embedding_backfill status=error phase=count processed=%d got=%d want=%d", processed, len(embeddings), len(chunks))
-			return
-		}
-		for i, chunk := range chunks {
-			if _, err := s.db.ExecContext(context.Background(), `
-				UPDATE memory_chunks
-				SET raw_embedding = $2::vector
-				WHERE id = $1 AND raw_embedding IS NULL
-			`, chunk.ID, vectorLiteral(embeddings[i])); err != nil {
-				log.Printf("memory.raw_embedding_backfill status=error phase=update processed=%d chunk_id=%q err=%q", processed, chunk.ID, err.Error())
-				return
-			}
-		}
-		processed += len(chunks)
-		if processed%512 == 0 {
-			log.Printf("memory.raw_embedding_backfill status=progress processed=%d total_ms=%d", processed, time.Since(start).Milliseconds())
-		}
-	}
 }
 
 func (s *Server) listMemories(ctx context.Context, userKey, kind, sourceType, scope, collection string, limit int) ([]MemorySummary, error) {
@@ -1053,6 +1022,9 @@ func (s *Server) searchVector(ctx context.Context, userKey, query string, req Se
 	collection := normalizeMetadataFilter(req.Collection)
 	resultRankLimit := searchResultRankLimit(req)
 	vectorPoolLimit := vectorCandidatePoolLimit(limit)
+	vectorColumn := "c.embedding"
+	vectorFilter := ""
+	vectorKind := "contextual"
 	scoreExpression := "vector_similarity"
 	if mode == searchModeHybrid {
 		scoreExpression = "(vector_similarity * 0.70) + (literal_score * 0.30)"
@@ -1062,7 +1034,7 @@ func (s *Server) searchVector(ctx context.Context, userKey, query string, req Se
 		WITH nearest AS (
 			SELECT c.memory_id, c.id AS chunk_id, i.title, c.text, c.context_text, c.metadata_text, i.kind, i.source_type, i.source_uri,
 				i.tags::text AS tags, i.metadata::text AS metadata, c.metadata::text AS chunk_metadata,
-				1 - (c.embedding <=> $2::vector) AS vector_similarity,
+				1 - (%s <=> $2::vector) AS vector_similarity,
 				i.updated_at
 			FROM memory_chunks c
 			JOIN memory_items i ON i.id = c.memory_id
@@ -1072,10 +1044,10 @@ func (s *Server) searchVector(ctx context.Context, userKey, query string, req Se
 				AND ($6 = '' OR i.source_uri LIKE '%%' || $6 || '%%' OR i.title LIKE $6 || '%%' OR i.metadata->>'modified_at' LIKE $6 || '%%')
 				AND ($7 = '' OR i.metadata->>'scope' = $7)
 				AND ($8 = '' OR i.metadata->>'collection' = $8)
-				AND (cardinality($9::text[]) = 0 OR i.title = ANY($9))
-				AND i.source_uri NOT LIKE '%%/.trash/%%'
-			ORDER BY c.embedding <=> $2::vector
-			LIMIT $12
+					AND i.source_uri NOT LIKE '%%/.trash/%%'
+					%s
+				ORDER BY %s <=> $2::vector
+				LIMIT $11
 		),
 		base AS (
 			SELECT *,
@@ -1113,10 +1085,10 @@ func (s *Server) searchVector(ctx context.Context, userKey, query string, req Se
 		SELECT memory_id, chunk_id, title, text, context_text, metadata_text, kind, source_type, source_uri, tags, metadata, chunk_metadata,
 			score, vector_similarity, literal_score, title_match, source_match, body_match, updated_at
 		FROM ranked
-				WHERE result_rank <= $11
-			ORDER BY score DESC
-			LIMIT $10
-		`, scoreExpression, scoreExpression), userKey, vectorLiteral(embedding), strings.TrimSpace(req.Kind), strings.TrimSpace(req.SourceType), query, timeFilter, scope, collection, pq.Array(req.SourceTitles), limit, resultRankLimit, vectorPoolLimit)
+					WHERE result_rank <= $10
+				ORDER BY score DESC
+				LIMIT $9
+			`, vectorColumn, vectorFilter, vectorColumn, scoreExpression, scoreExpression), userKey, vectorLiteral(embedding), strings.TrimSpace(req.Kind), strings.TrimSpace(req.SourceType), query, timeFilter, scope, collection, limit, resultRankLimit, vectorPoolLimit)
 	if err != nil {
 		log.Printf("memory.search_vector request_id=%q status=error phase=db mode=%q query=%q query_chars=%d embed_ms=%d db_ms=%d err=%q", req.RequestID, mode, query, len([]rune(query)), embedMs, time.Since(dbStart).Milliseconds(), err.Error())
 		return nil, err
@@ -1127,7 +1099,7 @@ func (s *Server) searchVector(ctx context.Context, userKey, query string, req Se
 		log.Printf("memory.search_vector request_id=%q status=error phase=scan mode=%q query=%q query_chars=%d embed_ms=%d db_ms=%d total_ms=%d err=%q", req.RequestID, mode, query, len([]rune(query)), embedMs, dbMs, time.Since(totalStart).Milliseconds(), err.Error())
 		return nil, err
 	}
-	log.Printf("memory.search_vector request_id=%q status=ok mode=%q query=%q query_chars=%d results=%d embed_ms=%d db_ms=%d total_ms=%d", req.RequestID, mode, query, len([]rune(query)), len(results), embedMs, dbMs, time.Since(totalStart).Milliseconds())
+	log.Printf("memory.search_vector request_id=%q status=ok mode=%q vector=%q query=%q query_chars=%d results=%d embed_ms=%d db_ms=%d total_ms=%d", req.RequestID, mode, vectorKind, query, len([]rune(query)), len(results), embedMs, dbMs, time.Since(totalStart).Milliseconds())
 	return results, nil
 }
 
@@ -1259,7 +1231,7 @@ func (s *Server) searchLiteral(ctx context.Context, userKey, query string, req S
 		WHERE literal_score > 0 AND result_rank <= $9
 		ORDER BY score DESC, updated_at DESC
 		LIMIT $8
-	`, userKey, query, strings.TrimSpace(req.Kind), strings.TrimSpace(req.SourceType), timeFilter, scope, collection, limit, resultRankLimit, recallQuery, recallTermString, titleSeedChunks)
+	`, userKey, query, strings.TrimSpace(req.Kind), strings.TrimSpace(req.SourceType), timeFilter, scope, collection, limit, resultRankLimit, recallQuery, recallTermString, literalTitleSeedChunks)
 	if err != nil {
 		log.Printf("memory.search_literal request_id=%q status=error phase=db query=%q query_chars=%d db_ms=%d err=%q", req.RequestID, query, len([]rune(query)), time.Since(dbStart).Milliseconds(), err.Error())
 		return nil, err
@@ -1433,6 +1405,7 @@ func (s *Server) runWatchDirs(ctx context.Context, userKey string) (WatchRunResp
 		upsertsBefore := response.Upserts
 		skippedBefore := response.Skipped
 		duplicatesBefore := response.Duplicates
+		relocatedBefore := response.Relocated
 		deletedBefore := response.Deleted
 		log.Printf("memory.watch_root status=start user=%q path=%q scope=%q collection=%q", userKey, root.Path, root.Scope, root.Collection)
 		err := filepath.WalkDir(root.Path, func(path string, entry os.DirEntry, err error) error {
@@ -1470,34 +1443,6 @@ func (s *Server) runWatchDirs(ctx context.Context, userKey string) (WatchRunResp
 			}
 			contentHash := contentHashFor(filepath.Base(abs), sourceURI, body, root.Scope, root.Collection)
 			contentFingerprint := contentFingerprintFor(body)
-			var existingID, existingHash string
-			err = s.db.QueryRowContext(ctx, `
-				SELECT id, content_hash FROM memory_items
-				WHERE user_key = $1 AND source_type = 'watch_file' AND source_uri = $2
-			`, userKey, sourceURI).Scan(&existingID, &existingHash)
-			if err == nil && existingHash == contentHash {
-				response.Skipped++
-				return nil
-			}
-			if err != nil && !errors.Is(err, sql.ErrNoRows) {
-				response.Skipped++
-				return nil
-			}
-			duplicateID, err := s.duplicateContentMemoryID(ctx, userKey, sourceURI, contentFingerprint)
-			if err != nil {
-				response.Skipped++
-				return nil
-			}
-			if duplicateID != "" {
-				response.Duplicates++
-				response.Skipped++
-				if existingID != "" {
-					if err := s.deleteMemory(ctx, userKey, existingID, "duplicate_content_hash"); err == nil {
-						response.Deleted++
-					}
-				}
-				return nil
-			}
 			metadata := map[string]any{
 				"path":                abs,
 				"size":                info.Size(),
@@ -1515,6 +1460,43 @@ func (s *Server) runWatchDirs(ctx context.Context, userKey string) (WatchRunResp
 			title := filepath.Base(abs)
 			if bookTitle := stringMapValue(metadata, "book_title"); bookTitle != "" {
 				title = bookTitle
+			}
+			var existingID, existingHash string
+			err = s.db.QueryRowContext(ctx, `
+				SELECT id, content_hash FROM memory_items
+				WHERE user_key = $1 AND source_type = 'watch_file' AND source_uri = $2
+			`, userKey, sourceURI).Scan(&existingID, &existingHash)
+			if err == nil && existingHash == contentHash {
+				response.Skipped++
+				return nil
+			}
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				response.Skipped++
+				return nil
+			}
+			duplicate, err := s.findDuplicateContentMemory(ctx, userKey, sourceURI, contentFingerprint)
+			if err != nil {
+				response.Skipped++
+				return nil
+			}
+			if duplicate.ID != "" && !watchedSourceExists(duplicate.SourceURI) {
+				if err := s.relocateWatchedMemory(ctx, userKey, duplicate, sourceURI, title, metadata, contentHash); err != nil {
+					log.Printf("memory.watch_file status=error phase=relocate user=%q old_source_uri=%q source_uri=%q err=%q", userKey, duplicate.SourceURI, sourceURI, err.Error())
+					response.Skipped++
+					return nil
+				}
+				response.Relocated++
+				return nil
+			}
+			if duplicate.ID != "" {
+				response.Duplicates++
+				response.Skipped++
+				if existingID != "" {
+					if err := s.deleteMemory(ctx, userKey, existingID, "duplicate_content_hash"); err == nil {
+						response.Deleted++
+					}
+				}
+				return nil
 			}
 			_, err = s.upsertMemory(ctx, userKey, UpsertMemoryRequest{
 				Kind:       "document",
@@ -1536,7 +1518,7 @@ func (s *Server) runWatchDirs(ctx context.Context, userKey string) (WatchRunResp
 		if err != nil {
 			return response, err
 		}
-		log.Printf("memory.watch_root status=done user=%q path=%q scope=%q collection=%q scanned=%d upserts=%d skipped=%d duplicates=%d deleted=%d ms=%d", userKey, root.Path, root.Scope, root.Collection, response.Scanned-scannedBefore, response.Upserts-upsertsBefore, response.Skipped-skippedBefore, response.Duplicates-duplicatesBefore, response.Deleted-deletedBefore, time.Since(rootStart).Milliseconds())
+		log.Printf("memory.watch_root status=done user=%q path=%q scope=%q collection=%q scanned=%d upserts=%d relocated=%d skipped=%d duplicates=%d deleted=%d ms=%d", userKey, root.Path, root.Scope, root.Collection, response.Scanned-scannedBefore, response.Upserts-upsertsBefore, response.Relocated-relocatedBefore, response.Skipped-skippedBefore, response.Duplicates-duplicatesBefore, response.Deleted-deletedBefore, time.Since(rootStart).Milliseconds())
 	}
 
 	existing, err := s.listWatchedSourceURIs(ctx, userKey)
@@ -1551,7 +1533,7 @@ func (s *Server) runWatchDirs(ctx context.Context, userKey string) (WatchRunResp
 			response.Deleted++
 		}
 	}
-	log.Printf("memory.watch_scan status=done user=%q scanned=%d upserts=%d skipped=%d duplicates=%d deleted=%d ms=%d", userKey, response.Scanned, response.Upserts, response.Skipped, response.Duplicates, response.Deleted, time.Since(scanStart).Milliseconds())
+	log.Printf("memory.watch_scan status=done user=%q scanned=%d upserts=%d relocated=%d skipped=%d duplicates=%d deleted=%d ms=%d", userKey, response.Scanned, response.Upserts, response.Relocated, response.Skipped, response.Duplicates, response.Deleted, time.Since(scanStart).Milliseconds())
 	return response, nil
 }
 
@@ -1576,13 +1558,18 @@ func (s *Server) listWatchedSourceURIs(ctx context.Context, userKey string) (map
 	return items, rows.Err()
 }
 
-func (s *Server) duplicateContentMemoryID(ctx context.Context, userKey, sourceURI, contentFingerprint string) (string, error) {
+type duplicateMemoryMatch struct {
+	ID        string
+	SourceURI string
+}
+
+func (s *Server) findDuplicateContentMemory(ctx context.Context, userKey, sourceURI, contentFingerprint string) (duplicateMemoryMatch, error) {
 	if strings.TrimSpace(contentFingerprint) == "" {
-		return "", nil
+		return duplicateMemoryMatch{}, nil
 	}
-	var id string
+	var duplicate duplicateMemoryMatch
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id
+		SELECT id, source_uri
 		FROM memory_items
 		WHERE user_key = $1
 			AND source_type = 'watch_file'
@@ -1590,14 +1577,67 @@ func (s *Server) duplicateContentMemoryID(ctx context.Context, userKey, sourceUR
 			AND metadata->>'content_fingerprint' = $3
 		ORDER BY updated_at ASC, source_uri ASC
 		LIMIT 1
-	`, userKey, sourceURI, contentFingerprint).Scan(&id)
+	`, userKey, sourceURI, contentFingerprint).Scan(&duplicate.ID, &duplicate.SourceURI)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil
+		return duplicateMemoryMatch{}, nil
 	}
 	if err != nil {
-		return "", err
+		return duplicateMemoryMatch{}, err
 	}
-	return id, nil
+	return duplicate, nil
+}
+
+func watchedSourceExists(sourceURI string) bool {
+	const filePrefix = "file://"
+	if !strings.HasPrefix(sourceURI, filePrefix) {
+		return true
+	}
+	info, err := os.Stat(strings.TrimPrefix(sourceURI, filePrefix))
+	return err == nil && !info.IsDir()
+}
+
+func (s *Server) relocateWatchedMemory(ctx context.Context, userKey string, duplicate duplicateMemoryMatch, sourceURI, title string, metadata map[string]any, contentHash string) error {
+	metadataJSON, err := json.Marshal(metadata)
+	if err != nil {
+		return err
+	}
+	oldPath := strings.TrimPrefix(duplicate.SourceURI, "file://")
+	newPath := strings.TrimPrefix(sourceURI, "file://")
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `
+		UPDATE memory_items
+		SET source_uri = $3, title = $4, metadata = $5::jsonb, content_hash = $6, updated_at = NOW()
+		WHERE user_key = $1 AND id = $2 AND source_type = 'watch_file'
+	`, userKey, duplicate.ID, sourceURI, title, string(metadataJSON), contentHash)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil || rows != 1 {
+		return fmt.Errorf("relocate memory item: updated %d rows", rows)
+	}
+	for _, statement := range []string{
+		`UPDATE memory_chunks SET context_text = replace(context_text, $3, $4), metadata_text = replace(metadata_text, $3, $4) WHERE user_key = $1 AND memory_id = $2`,
+		`UPDATE memory_nodes SET metadata_text = replace(metadata_text, $3, $4) WHERE user_key = $1 AND memory_id = $2`,
+	} {
+		if _, err := tx.ExecContext(ctx, statement, userKey, duplicate.ID, oldPath, newPath); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if s.bm25 != nil {
+		if err := s.bm25.RefreshMemory(ctx, s.db, userKey, duplicate.ID); err != nil {
+			return err
+		}
+	}
+	log.Printf("memory.watch_file status=relocated user=%q id=%q old_source_uri=%q source_uri=%q", userKey, duplicate.ID, duplicate.SourceURI, sourceURI)
+	return nil
 }
 
 func readWatchFile(ctx context.Context, path string) (string, map[string]any, error) {
@@ -2253,10 +2293,6 @@ func firstMarkdownHeading(text string) string {
 	return ""
 }
 
-func rawEmbeddingInput(chunk string) string {
-	return strings.TrimSpace(chunk)
-}
-
 func metadataTextForChunk(req UpsertMemoryRequest, chunk textChunk, index int, contextText string, generated chunkContextMetadata) string {
 	parts := []string{}
 	if title := firstNonEmpty(stringMapValue(req.Metadata, "book_title"), req.Title); title != "" {
@@ -2532,6 +2568,21 @@ func parseWatchDirs(raw string) map[string][]WatchRoot {
 	return result
 }
 
+func watchDirsForInstance(watchDirs map[string][]WatchRoot, instanceUserKey string) (map[string][]WatchRoot, error) {
+	instanceUserKey = strings.TrimSpace(instanceUserKey)
+	if instanceUserKey == "" {
+		return watchDirs, nil
+	}
+	roots, ok := watchDirs[instanceUserKey]
+	if !ok {
+		if len(watchDirs) == 0 {
+			return map[string][]WatchRoot{}, nil
+		}
+		return nil, fmt.Errorf("MEMORY_PALACE_USER_KEY %q has no entry in MEMORY_PALACE_WATCH_DIRS", instanceUserKey)
+	}
+	return map[string][]WatchRoot{instanceUserKey: roots}, nil
+}
+
 func parseWatchRoot(raw string) WatchRoot {
 	parts := strings.Split(raw, "|")
 	root := WatchRoot{
@@ -2598,7 +2649,10 @@ func ignoredWatchDirectory(name string) bool {
 	}
 }
 
-func userKeyFromRequest(r *http.Request) string {
+func (s *Server) userKeyFromRequest(r *http.Request) string {
+	if s.instanceUserKey != "" {
+		return s.instanceUserKey
+	}
 	if value := strings.TrimSpace(r.Header.Get("X-Memory-User-Key")); value != "" {
 		return value
 	}
@@ -2633,6 +2687,18 @@ func envOrDefault(key string, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func parseBoolean(raw string, fallback bool) bool {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
 }
 
 func firstNonEmpty(values ...string) string {

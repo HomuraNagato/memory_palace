@@ -22,40 +22,66 @@ func TestBM25SearchRanksDistinctiveTerms(t *testing.T) {
 	}
 }
 
-func TestBM25SearchParentsFiltersAndLimitsEachParent(t *testing.T) {
+func TestBM25SearchNodesFiltersAndLimitsEachNode(t *testing.T) {
 	index := NewBM25Index()
 	index.mu.Lock()
 	first := newBM25TestDocument("book", "chapter-1-a", "A rare spellbook was received at school.")
-	first.parentID = "chapter-1"
+	first.nodeID = "chapter-1"
 	index.addLocked(first)
 	second := newBM25TestDocument("book", "chapter-1-b", "Another school spellbook appears here.")
-	second.parentID = "chapter-1"
+	second.nodeID = "chapter-1"
 	index.addLocked(second)
 	other := newBM25TestDocument("book", "chapter-2-a", "This spellbook belongs to another chapter.")
-	other.parentID = "chapter-2"
+	other.nodeID = "chapter-2"
 	index.addLocked(other)
 	index.mu.Unlock()
 
-	results := index.SearchParents("local", SearchRequest{Query: "received spellbook school"}, []string{"chapter-1"}, 1)
-	if len(results) != 1 || stringMapValue(results[0].ChunkMetadata, "parent_id") != "chapter-1" {
-		t.Fatalf("expected one result from the selected parent, got %#v", results)
+	results := index.SearchNodes("local", SearchRequest{Query: "received spellbook school"}, []string{"chapter-1"}, 1)
+	if len(results) != 1 || stringMapValue(results[0].ChunkMetadata, "node_id") != "chapter-1" {
+		t.Fatalf("expected one result from the selected node, got %#v", results)
 	}
 }
 
-func TestBM25SearchRestrictsIdentifiedSourceTitles(t *testing.T) {
+func TestBM25SearchMemoriesFiltersAndLimitsEachDocument(t *testing.T) {
 	index := NewBM25Index()
 	index.mu.Lock()
-	target := newBM25TestDocument("book-1", "target", "Her mum is Gwen Higgins.")
-	target.result.Title = "The Scholomance"
-	index.addLocked(target)
-	other := newBM25TestDocument("book-2", "other", "Another mum appears here.")
-	other.result.Title = "Another Book"
-	index.addLocked(other)
+	for _, document := range []*bm25Document{
+		newBM25TestDocument("book-a", "a-answer", "Talia Voss is Niko's mother."),
+		newBM25TestDocument("book-a", "a-related", "Niko remembers his mother."),
+		newBM25TestDocument("book-b", "b-answer", "Mira Voss is Niko's mother."),
+		newBM25TestDocument("book-c", "excluded", "Another mother named Aria appears."),
+	} {
+		index.addLocked(document)
+	}
 	index.mu.Unlock()
 
-	results := index.Search("local", SearchRequest{Query: "mum", SourceTitles: []string{"The Scholomance"}}, 10)
-	if len(results) != 1 || results[0].ChunkID != "target" {
-		t.Fatalf("expected only the identified source result, got %#v", results)
+	results := index.SearchMemories(
+		"local",
+		SearchRequest{Query: "mother name"},
+		[]string{"book-a", "book-b"},
+		1,
+	)
+	if len(results) != 2 {
+		t.Fatalf("expected one result from each selected document, got %#v", results)
+	}
+	seen := map[string]bool{}
+	for _, result := range results {
+		seen[result.MemoryID] = true
+		if result.ChunkID == "excluded" {
+			t.Fatal("result from an unselected document was returned")
+		}
+		if rank, ok := intMapValue(result.ChunkMetadata, "conditioned_rank"); !ok || rank != 1 {
+			t.Fatalf("missing conditioned rank: %#v", result.ChunkMetadata)
+		}
+	}
+	if !seen["book-a"] || !seen["book-b"] {
+		t.Fatalf("selected documents were not both represented: %#v", seen)
+	}
+
+	index.RemoveMemory("book-a")
+	results = index.SearchMemories("local", SearchRequest{Query: "mother name"}, []string{"book-a"}, 2)
+	if len(results) != 0 {
+		t.Fatalf("removed document remained in conditioned index: %#v", results)
 	}
 }
 

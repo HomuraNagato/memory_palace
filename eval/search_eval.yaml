@@ -1,240 +1,420 @@
-version: 2
+version: 3
 name: memory-palace-retrieval
 description: >
-  Retrieval evaluation cases for Memory Palace. Each expected result uses a
-  source identity plus an evidence anchor. Source identity stays stable across
-  rechunking; evidence recall confirms that retrieval found the relevant passage
-  rather than an arbitrary chunk from the same document.
+  Mixed-corpus retrieval and answer evaluation. Evidence anchors identify
+  answer-bearing passages without relying on generated chunk IDs. Private
+  holdout questions are supplied at runtime and do not belong in this file.
 
 defaults:
-  user_key: local
-  scope: memories
-  collection: obsidian
+  user_key: nagato
   mode: hybrid
-  expected_top_k: 5
+  expected_top_k: 8
 
 queries:
-  - id: relationship_mark_interview_support
-    difficulty: hard
-    category: relationship
-    query: "Who was credited with the rigorous preparation that helped someone secure an Amazon position?"
-    expected:
-      source:
-        relative_path: "diary/2024/10 October/2024.10.03 - Thursday.md"
-        title: "2024.10.03 - Thursday.md"
-      evidence_contains: "strict but important interview prep"
-
-  - id: book_uprooted_dragon_selection
-    difficulty: hard
-    category: relationship
-    query: "Which beloved childhood friend does the narrator expect the wizard called the Dragon to choose from their village?"
-    expected:
-      source:
-        scope: library
-        collection: library
-        relative_path: "Uprooted (8)/Uprooted - Naomi Novik.epub"
-        title: Uprooted
-      evidence_contains: "we all knew he would take Kasia"
-
-  - id: relationship_nj_social_knowledge
-    difficulty: hard
-    category: relationship
-    query: "Which companion pointed out that the author lived in a social-knowledge bubble during a New Jersey visit?"
-    expected:
-      source:
-        relative_path: "diary/2025/11 November/2025-Nov-02.md"
-        title: "2025-Nov-02.md"
-      evidence_contains: "how much of a bubble I lived in"
-
-  - id: book_uprooted_valley_protection
-    difficulty: hard
-    category: relationship
-    query: "Which powerful wizard is bound to protect a valley from the corrupted Wood?"
-    expected:
-      source:
-        scope: library
-        collection: library
-        relative_path: "Uprooted (8)/Uprooted - Naomi Novik.epub"
-        title: Uprooted
-      evidence_contains: "stay here and watch the Wood"
-
-  - id: book_scholomance_orion_rescues
-    difficulty: hard
-    category: relationship
-    query: "Which celebrated student becomes El's unwanted personal rescuer after repeatedly saving her?"
-    expected:
-      source:
-        scope: library
-        collection: library
-        relative_path: "A Deadly Education (The Scholomance) (11)/A Deadly Education (The Scholom - Naomi Novik.epub"
-        title: "A Deadly Education (The Scholomance)"
-      evidence_contains: "Orion Lake, my personal bodyguard"
-
-  - id: book_scholomance_aadhya_artifice
-    difficulty: hard
-    category: relationship
-    query: "Which pragmatic artificer joins El's dangerous three-discipline mirror project?"
-    expected:
-      source:
-        scope: library
-        collection: library
-        relative_path: "A Deadly Education (The Scholomance) (11)/A Deadly Education (The Scholom - Naomi Novik.epub"
-        title: "A Deadly Education (The Scholomance)"
-      evidence_contains: "three-discipline project"
-
-  - id: relationship_old_dancing_video
-    difficulty: hard
-    category: relationship
-    query: "Which pair in an old school-age dance video seemed meant for each other to the author?"
-    expected:
-      source:
-        relative_path: "dreams/2025/2025.11.11.md"
-        title: "2025.11.11.md"
-      evidence_contains: "Maybe they are meant for each other"
-
-  - id: relationship_dentist_referral
-    difficulty: hard
-    category: relationship
-    query: "Who had previously found the Gangnam dentist the author used after a broken filling?"
-    expected:
-      source:
-        relative_path: "diary/2023/11 November/2023.11.08 - Wednesday.md"
-        title: "2023.11.08 - Wednesday.md"
-      evidence_contains: "a place in Gangnam that Mark found"
-
-  - id: relationship_jewelry_family_trade
-    difficulty: hard
-    category: relationship
-    query: "Whose father trains her in jewelry work?"
-    expected:
-      source:
-        relative_path: "ひと/Serene.md"
-        title: "Serene.md"
-      evidence_contains: "works as a jeweler in training with her dad"
-
-  - id: relationship_life_reason
-    difficulty: hard
-    category: relationship
-    query: "Which partner gave the author a stronger reason to live while reflecting on a nightmare?"
-    expected:
-      source:
-        relative_path: "dreams/2025/2025.10.31.md"
-        title: "2025.10.31.md"
-      evidence_contains: "Now that I'm with Serene I have greater reason to live"
-
-  - id: relationship_queens_10k_companions
-    difficulty: hard
-    category: relationship
-    query: "At the Queens 10K, whose finish time was listed alongside Sabrina's, and who completed later?"
-    expected:
-      source:
-        relative_path: "memory palace/queens 10k.md"
-        title: "queens 10k.md"
-      evidence_contains: "Mark and Sabrina: 1:03:47"
-
-  - id: relationship_mark_nostalgia
-    difficulty: hard
-    category: relationship
-    query: "Who did a game-video montage make the author remember with bittersweet sadness?"
-    expected:
-      source:
-        relative_path: "diary/2025/11 November/2025-Nov-06.md"
-        title: "2025-Nov-06.md"
-      evidence_contains: "It makes me think of Mark"
-
-  - id: book_scholomance_liu_friendship
-    difficulty: hard
-    category: relationship
-    query: "Which feared maleficer remains one of the few students willing to keep El company?"
-    expected:
-      source:
-        scope: library
-        collection: library
-        relative_path: "A Deadly Education (The Scholomance) (11)/A Deadly Education (The Scholom - Naomi Novik.epub"
-        title: "A Deadly Education (The Scholomance)"
-      evidence_contains: "Liu may be a dark witch"
-
-  - id: book_scholomance_important_book
-    difficulty: hard
-    category: relationship
-    query: "What is an important book El receives while at the Scholomance?"
-    expected:
-      source:
-        scope: library
-        collection: library
-        relative_path: "A Deadly Education (The Scholomance) (11)/A Deadly Education (The Scholom - Naomi Novik.epub"
-        title: "A Deadly Education (The Scholomance)"
-      evidence_contains: "The Golden Stone sutras are famous"
-      answer_contains: "Golden Stone sutras"
-
-  - id: semantic_soy_coffee_drink
+  - id: easy_usual_coffee_order
     difficulty: easy
     category: semantic
-    query: "What is the usual green nut-flavored blended coffee drink made with a soy substitute?"
+    query: "What is my usual Starbucks order?"
     expected:
-      source:
-        relative_path: "cafes-shops/habitual food orders/starbucks.md"
-        title: "starbucks.md"
-      evidence_contains: "pistachio creme frappuchinno with soy milk"
+      evidence:
+        - source:
+            relative_path: "cafes-shops/habitual food orders/starbucks.md"
+            title: "starbucks.md"
+          any_of: ["tall pistachio creme frappuchinno with soy milk"]
+      answer:
+        any_of: ["pistachio creme frapp", "pistachio crème frapp"]
 
-  - id: semantic_korean_pause_and_apology
+  - id: easy_korean_wait_and_apologize
     difficulty: easy
     category: semantic
-    query: "Where are the basic Korean phrases for asking someone to wait and saying sorry?"
+    query: "How do I ask someone to wait and then apologize in Korean?"
     expected:
-      source:
-        relative_path: "languages/Korean/korean greetings.md"
-        title: "korean greetings.md"
-      evidence_contains: "one moment please"
+      evidence:
+        - source:
+            relative_path: "languages/Korean/korean greetings.md"
+            title: "korean greetings.md"
+          all_of: ["잠시만주세요", "죄송합니다"]
+      answer:
+        all_of: ["잠시만", "죄송"]
 
-  - id: semantic_roommate_screening
+  - id: easy_roommate_kitchen_question
     difficulty: easy
     category: semantic
-    query: "What checklist covers compatibility questions before sharing an apartment with someone?"
+    query: "What question did I save for discussing kitchen cleanliness with a potential roommate?"
     expected:
-      source:
-        relative_path: "memory palace/roommate questions.md"
-        title: "roommate questions.md"
-      evidence_contains: "how clean are you in a kitchen?"
+      evidence:
+        - source:
+            relative_path: "memory palace/roommate questions.md"
+            title: "roommate questions.md"
+          any_of: ["how clean are you in a kitchen?"]
+      answer:
+        any_of: ["how clean are you in a kitchen"]
 
-  - id: semantic_queens_race_plan
+  - id: easy_serene_present_ideas
     difficulty: easy
     category: semantic
-    query: "Which note has the Corona Park race schedule, restaurant stops, and 10K finish results?"
+    query: "What holiday present ideas did I record for Serene?"
     expected:
-      source:
-        relative_path: "memory palace/queens 10k.md"
-        title: "queens 10k.md"
-      evidence_contains: "race starts at 9:35am"
+      evidence:
+        - source:
+            relative_path: "memory palace/Christmas presents.md"
+            title: "Christmas presents.md"
+          all_of: ["Disney ticket", "Pokemon z-a"]
+      answer:
+        all_of: ["Disney", "Pokemon"]
 
-  - id: semantic_holiday_shopping
+  - id: easy_scrooge_initial_character
     difficulty: easy
     category: semantic
-    query: "Where is the running list of winter holiday present ideas organized by recipient?"
+    query: "How is Scrooge's withdrawn and ungenerous personality described near the beginning of the story?"
     expected:
-      source:
-        relative_path: "memory palace/Christmas presents.md"
-        title: "Christmas presents.md"
-      evidence_contains: "serene: Disney ticket, Pokemon z-a"
+      evidence:
+        - source:
+            relative_path: "books/charles_dickens/a_christmas_carol/a_christmas_carol-charles_dickens.epub"
+            title: "A Christmas Carol"
+          any_of: ["secret, and self-contained, and solitary as an oyster"]
+      answer:
+        any_of: ["solitary as an oyster", "self-contained"]
 
-  - id: semantic_magic_school_book
+  - id: easy_sinegard_purpose
     difficulty: easy
     category: semantic
-    query: "Which diary entry says the author completed the first novel in a dangerous magic-school series?"
+    query: "What kind of people is the empire's most prestigious academy intended to train?"
     expected:
-      source:
-        relative_path: "diary/2025/11 November/2025-Nov-30.md"
-        title: "2025-Nov-30.md"
-      evidence_contains: "finished book one of the Scholomance trilogy"
+      evidence:
+        - source:
+            relative_path: "books/r_f_kuang/the_poppy_war/01-the_poppy_war/the_poppy_war-r_f_kuang.epub"
+            title: "The Poppy War"
+          any_of: ["a training ground for future generals and statesmen"]
+      answer:
+        all_of: ["generals", "statesmen"]
 
-  - id: semantic_uprooted_wood
-    difficulty: easy
-    category: semantic
-    query: "Which fantasy novel follows a valley defended from a malevolent forest by a wizard known as the Dragon?"
+  - id: medium_amazon_interview_support
+    difficulty: medium
+    category: relationship
+    query: "Who helped Mark prepare effectively enough to secure the Amazon job?"
     expected:
-      source:
-        scope: library
-        collection: library
-        relative_path: "Uprooted (8)/Uprooted - Naomi Novik.epub"
-        title: Uprooted
-      evidence_contains: "He protects us against the Wood"
+      evidence:
+        - source:
+            relative_path: "diary/2024/10 October/2024.10.03 - Thursday.md"
+            title: "2024.10.03 - Thursday.md"
+          any_of: ["thanks to Lingyi’s really strict but important interview prep"]
+      answer:
+        any_of: ["Lingyi"]
+
+  - id: medium_gangnam_dentist_referral
+    difficulty: medium
+    category: relationship
+    query: "Who originally located the Korean dental office I later used for my broken filling?"
+    expected:
+      evidence:
+        - source:
+            relative_path: "diary/2023/11 November/2023.11.08 - Wednesday.md"
+            title: "2023.11.08 - Wednesday.md"
+          any_of: ["a place in Gangnam that Mark found"]
+      answer:
+        any_of: ["Mark"]
+
+  - id: medium_social_bubble_observer
+    difficulty: medium
+    category: relationship
+    query: "Who made me realize during the New Jersey trip that my knowledge of notable people was limited?"
+    expected:
+      evidence:
+        - source:
+            relative_path: "diary/2025/11 November/2025-Nov-02.md"
+            title: "2025-Nov-02.md"
+          any_of: ["she observed how much of a bubble I lived in"]
+      answer:
+        any_of: ["Serene"]
+
+  - id: medium_ender_battleroom_orientation
+    difficulty: medium
+    category: concept
+    query: "What mental reorientation does Ender teach his soldiers to use when entering the battleroom?"
+    expected:
+      evidence:
+        - source:
+            relative_path: "books/orson_scott_card/ender_saga/01-enders_game/enders_game-orson_scott_card.epub"
+            title: "Ender’s Game"
+          any_of: ["Whatever your gravity is when you get to the door, remember—the enemy’s gate is down"]
+      answer:
+        any_of: ["enemy’s gate is down", "enemy's gate is down"]
+
+  - id: medium_gethenian_sexual_cycle
+    difficulty: medium
+    category: concept
+    query: "How does reproductive sex change during the monthly cycle of people on Gethen?"
+    expected:
+      evidence:
+        - source:
+            relative_path: "books/ursula_k_le_guin/the_left_hand_of_darkness/the_left_hand_of_darkness-ursula_k_le_guin.epub"
+            title: "The Left Hand of Darkness"
+          all_of: ["two or three days of kemmer", "either male or female"]
+      answer:
+        all_of: ["kemmer", "male or female"]
+
+  - id: medium_islr_model_selection
+    difficulty: medium
+    category: textbook
+    query: "Which prediction error should determine the preferred statistical learning method, and why isn't performance on fitted observations enough?"
+    expected:
+      evidence:
+        - source:
+            relative_path: "textbooks/Probability and Stochastics/Intro to statistical learning/ISLR Sixth Printing.pdf"
+            title: "ISLR Sixth Printing.pdf"
+          all_of: ["previously unseen test observation", "lowest test MSE, as opposed to the lowest training MSE"]
+      answer:
+        all_of: ["test MSE", "unseen"]
+
+  - id: medium_strang_rank_nullity
+    difficulty: medium
+    category: textbook
+    query: "How do pivot variables and free variables account for all columns of a matrix?"
+    expected:
+      evidence:
+        - source:
+            relative_path: "textbooks/Linear Algebra/Strang linear algebra/Linear Algebra and its applications fourth edition Strang.pdf"
+            title: "Linear Algebra and its applications fourth edition Strang.pdf"
+          any_of: ["rank plus nullity equals n"]
+      answer:
+        any_of: ["nullity", "dimension of the nullspace"]
+        all_of: ["pivot", "free", "rank"]
+
+  - id: medium_three_body_game_recruitment
+    difficulty: medium
+    category: purpose
+    query: "Why did the ETO create and distribute its immersive game?"
+    expected:
+      evidence:
+        - source:
+            relative_path: "books/cixin_liu/remembrance_of_earths_past/01-the_three_body_problem/the_three_body_problem-cixin_liu.epub"
+            title: "The Three-Body Problem"
+          all_of: ["to proselytize the Trisolaran religion", "recruit younger ETO members"]
+      answer:
+        all_of: ["Trisolaran", "recruit"]
+
+  - id: hard_serene_family_trade
+    difficulty: hard
+    category: relationship
+    query: "What craft is Serene learning through work with a parent?"
+    expected:
+      evidence:
+        - source:
+            relative_path: "ひと/Serene.md"
+            title: "Serene.md"
+          any_of: ["works as a jeweler in training with her dad"]
+      answer:
+        any_of: ["jeweler", "jewelry"]
+
+  - id: hard_nightmare_reason_to_live
+    difficulty: hard
+    category: relationship
+    query: "Which relationship changed how strongly I felt attached to staying alive after the nightmare?"
+    expected:
+      evidence:
+        - source:
+            relative_path: "dreams/2025/2025.10.31.md"
+            title: "2025.10.31.md"
+          any_of: ["Now that I'm with Serene I have greater reason to live"]
+      answer:
+        any_of: ["Serene"]
+
+  - id: hard_game_montage_nostalgia
+    difficulty: hard
+    category: relationship
+    query: "Who came to mind when the rapidly changing game-character video caused a strong bittersweet reaction?"
+    expected:
+      evidence:
+        - source:
+            relative_path: "diary/2025/11 November/2025-Nov-06.md"
+            title: "2025-Nov-06.md"
+          any_of: ["It makes me think of Mark"]
+      answer:
+        any_of: ["Mark"]
+
+  - id: hard_uprooted_expected_selection
+    difficulty: hard
+    category: relationship
+    query: "Which girl does Agnieszka's community believe will be chosen when the local wizard next takes someone?"
+    expected:
+      evidence:
+        - source:
+            relative_path: "books/naomi_novik/uprooted/uprooted-naomi_novik.epub"
+            title: "Uprooted"
+          any_of: ["we all knew he would take Kasia"]
+      answer:
+        any_of: ["Kasia"]
+
+  - id: hard_legendborn_maternal_magic
+    difficulty: hard
+    category: relationship
+    query: "What nature-based magical discipline did Bree learn that her mother had practiced?"
+    expected:
+      evidence:
+        - source:
+            relative_path: "books/tracy_deonn/legendborn/01-legendborn/legendborn-tracy_deonn.epub"
+            title: "Legendborn"
+          all_of: ["Wildcraft is shorthand for the branch of Rootcraft she practiced", "your mother knew the craft"]
+      answer:
+        any_of: ["Wildcraft", "Rootcraft"]
+
+  - id: hard_scholomance_enclave_text
+    difficulty: hard
+    category: relationship
+    query: "What important written work does El receive, and why is it historically significant to wizard communities?"
+    expected:
+      evidence:
+        - source:
+            relative_path: "books/naomi_novik/the_scholomance/01-a_deadly_education/a_deadly_education-naomi_novik.epub"
+            title: "A Deadly Education (The Scholomance)"
+          all_of: ["The Golden Stone sutras are famous", "the first known enclave-builder spells"]
+      answer:
+        all_of: ["Golden Stone sutras", "enclave"]
+
+  - id: hard_scholomance_els_mother
+    difficulty: hard
+    category: relationship
+    query: "In the Scholomance trilogy, what is El's mother's name?"
+    expected:
+      evidence:
+        - source:
+            relative_path: "books/naomi_novik/the_scholomance/01-a_deadly_education/a_deadly_education-naomi_novik.epub"
+            title: "A Deadly Education (The Scholomance)"
+          any_of: ["Gwen Higgins is your mother"]
+      answer:
+        any_of: ["Gwen Higgins"]
+
+  - id: textbook_clrs_loop_correctness
+    difficulty: medium
+    category: textbook
+    query: "What three obligations establish that a loop's claimed property proves an algorithm correct?"
+    expected:
+      evidence:
+        - source:
+            relative_path: "textbooks/Algorithms/introduction_to_algorithms_3rd_edition.pdf"
+            title: "introduction_to_algorithms_3rd_edition.pdf"
+          all_of: ["Initialization: It is true prior to the", "Maintenance: If it is true before an iteration", "Termination: When the loop terminates"]
+      answer:
+        all_of: ["Initialization", "Maintenance", "Termination"]
+
+  - id: textbook_billingsley_chapter_one_scope
+    difficulty: hard
+    category: textbook_structure
+    query: "What major probabilistic subjects does the first chapter of Billingsley's text develop before general measure and integration?"
+    expected:
+      evidence:
+        - source:
+            relative_path: "textbooks/Probability and Stochastics/Billingsley Probability Sunhwa Recomended/Billingsley - Probability and Measure.pdf"
+            title: "Billingsley - Probability and Measure.pdf"
+          all_of: ["laws of large numbers", "Markov chains", "large deviations"]
+      answer:
+        all_of: ["laws of large numbers", "Markov chains", "large deviations"]
+
+  - id: textbook_strang_column_and_null_spaces
+    difficulty: hard
+    category: textbook_concept
+    query: "Contrast the vectors represented by a matrix's column space with those represented by its nullspace."
+    expected:
+      evidence:
+        - source:
+            relative_path: "textbooks/Linear Algebra/Strang linear algebra/Linear Algebra and its applications fourth edition Strang.pdf"
+            title: "Linear Algebra and its applications fourth edition Strang.pdf"
+          any_of: ["The column space contains all linear combinations of the columns of A"]
+        - source:
+            relative_path: "textbooks/Linear Algebra/Strang linear algebra/Linear Algebra and its applications fourth edition Strang.pdf"
+            title: "Linear Algebra and its applications fourth edition Strang.pdf"
+          any_of: ["The nullspace of a matrix consists of all vectors x such that Ax = 0"]
+      answer:
+        all_of: ["linear combinations", "Ax = 0"]
+
+  - id: textbook_random_walk_wait
+    difficulty: medium
+    category: textbook_concept
+    query: "In the random-walk example about Peter taking the lead, how does the expected waiting time differ between a favorable game and a fair game?"
+    expected:
+      evidence:
+        - source:
+            relative_path: "textbooks/Probability and Stochastics/Snell Probability/Dartmouth Probability Textbook.pdf"
+            title: "Dartmouth Probability Textbook.pdf"
+          all_of: ["1/(p − q), if p > q", "if p = q"]
+      answer:
+        any_of: ["1/(p", "infinite", "infinity"]
+
+  - id: synthesis_sherlock_clues_and_cause
+    difficulty: hard
+    category: multi_evidence
+    query: "Which apparently minor objects reveal the murder method in the Stoner case, and what ultimately kills the person who arranged it?"
+    expected:
+      evidence:
+        - source:
+            relative_path: "books/arthur_conan_doyle/the_adventures_of_sherlock_holmes/the_adventures_of_sherlock_holmes-arthur_conan_doyle.epub"
+            title: "The Adventures of Sherlock Holmes"
+          all_of: ["the saucer of milk", "the loop of whipcord"]
+        - source:
+            relative_path: "books/arthur_conan_doyle/the_adventures_of_sherlock_holmes/the_adventures_of_sherlock_holmes-arthur_conan_doyle.epub"
+            title: "The Adventures of Sherlock Holmes"
+          any_of: ["It is a swamp adder!"]
+      answer:
+        all_of: ["milk", "whipcord", "swamp adder"]
+
+  - id: synthesis_hyperion_cruciform
+    difficulty: hard
+    category: multi_evidence
+    query: "What claim do the Bikura make about people bearing the cross-shaped parasite, and how does it respond when an injury remains severely painful?"
+    expected:
+      evidence:
+        - source:
+            relative_path: "books/dan_simmons/hyperion_cantos/01-hyperion/hyperion-dan_simmons.epub"
+            title: "Hyperion"
+          any_of: ["You cannot die because you belong to the cruciform"]
+        - source:
+            relative_path: "books/dan_simmons/hyperion_cantos/01-hyperion/hyperion-dan_simmons.epub"
+            title: "Hyperion"
+          any_of: ["It was easier for the cruciform to resurrect his corpse than to tolerate such pain"]
+      answer:
+        all_of: ["cannot die", "resurrect"]
+
+  - id: synthesis_uprooted_selection_and_resentment
+    difficulty: hard
+    category: multi_evidence
+    query: "Who is expected to be taken from the village, and how does that expectation shape Agnieszka's feelings toward the Dragon?"
+    expected:
+      evidence:
+        - source:
+            relative_path: "books/naomi_novik/uprooted/uprooted-naomi_novik.epub"
+            title: "Uprooted"
+          any_of: ["we all knew he would take Kasia"]
+        - source:
+            relative_path: "books/naomi_novik/uprooted/uprooted-naomi_novik.epub"
+            title: "Uprooted"
+          any_of: ["he was going to take Kasia away, so I hated him"]
+      answer:
+        all_of: ["Kasia", "hate"]
+
+  - id: unanswerable_holmes_mars_visit
+    difficulty: hard
+    category: unanswerable
+    query: "In what year did Sherlock Holmes first investigate a crime on Mars?"
+    expected:
+      unanswerable: true
+      answer:
+        any_of: ["not in", "does not", "couldn't find", "could not find", "no evidence"]
+
+  - id: unanswerable_billingsley_image_network
+    difficulty: hard
+    category: unanswerable
+    query: "Which neural-network architecture does Billingsley recommend for classifying photographs?"
+    expected:
+      unanswerable: true
+      answer:
+        any_of: ["not in", "does not", "couldn't find", "could not find", "no evidence"]
+
+  - id: unanswerable_queens_narrator_time
+    difficulty: hard
+    category: unanswerable
+    query: "What was my own finish time at the Queens 10K?"
+    expected:
+      unanswerable: true
+      answer:
+        any_of: ["not provided", "not recorded", "doesn't say", "does not say", "does not contain", "cannot be determined", "couldn't find", "could not find"]

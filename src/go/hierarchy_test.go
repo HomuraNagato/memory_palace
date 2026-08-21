@@ -15,17 +15,38 @@ func TestBuildParentNodesGroupsLogicalSections(t *testing.T) {
 		{Text: "Third", Metadata: map[string]any{"chapter": 2, "chunk_index": 2}},
 	}
 	parents, childParentIDs := buildParentNodes(req, chunks)
-	if len(parents) != 2 {
-		t.Fatalf("expected two parent nodes, got %d", len(parents))
+	if len(parents) != 3 {
+		t.Fatalf("expected document root and two chapter nodes, got %d", len(parents))
 	}
 	if childParentIDs[0] != childParentIDs[1] || childParentIDs[1] == childParentIDs[2] {
 		t.Fatalf("unexpected child parent IDs: %#v", childParentIDs)
 	}
-	if parents[0].Text != "First\n\nSecond" {
-		t.Fatalf("unexpected first parent text: %q", parents[0].Text)
+	if parents[0].NodeType != "document" || parents[0].Text != "First\n\nSecond\n\nThird" {
+		t.Fatalf("unexpected document root: %#v", parents[0])
 	}
-	if parents[0].Metadata["label"] != "Chapter 1" {
-		t.Fatalf("unexpected first parent metadata: %#v", parents[0].Metadata)
+	if parents[1].Text != "First\n\nSecond" || parents[1].ParentID != parents[0].ID {
+		t.Fatalf("unexpected first chapter: %#v", parents[1])
+	}
+	if parents[1].Metadata["label"] != "Chapter 1" {
+		t.Fatalf("unexpected first chapter metadata: %#v", parents[1].Metadata)
+	}
+}
+
+func TestBuildParentNodesNestsSectionsInsideChapters(t *testing.T) {
+	req := UpsertMemoryRequest{Title: "Example", SourceURI: "file:///example.epub"}
+	chunks := []textChunk{
+		{Text: "First", Metadata: map[string]any{"chapter": 1, "heading": "Opening"}},
+		{Text: "Second", Metadata: map[string]any{"chapter": 1, "heading": "Opening"}},
+	}
+	nodes, chunkNodeIDs := buildParentNodes(req, chunks)
+	if len(nodes) != 3 {
+		t.Fatalf("expected document, chapter, and section nodes, got %#v", nodes)
+	}
+	if nodes[2].NodeType != "section" || nodes[2].ParentID != nodes[1].ID || nodes[2].Depth != 2 {
+		t.Fatalf("unexpected section hierarchy: %#v", nodes[2])
+	}
+	if chunkNodeIDs[0] != nodes[2].ID || chunkNodeIDs[1] != nodes[2].ID {
+		t.Fatalf("expected passages attached to the section node, got %#v", chunkNodeIDs)
 	}
 }
 
@@ -55,7 +76,7 @@ func TestAssignParentEmbeddingsNormalizesMean(t *testing.T) {
 
 func TestFuseHierarchyChildrenCombinesVectorAndLexicalLanes(t *testing.T) {
 	sharedVector := SearchResult{MemoryID: "book", ChunkID: "shared", ScoreParts: ScoreParts{VectorSimilarity: 0.8}, ChunkMetadata: map[string]any{}}
-	sharedLexical := SearchResult{MemoryID: "book", ChunkID: "shared", ScoreParts: ScoreParts{LiteralScore: 3.2}, ChunkMetadata: map[string]any{"parent_bm25_rank": 1}}
+	sharedLexical := SearchResult{MemoryID: "book", ChunkID: "shared", ScoreParts: ScoreParts{LiteralScore: 3.2}, ChunkMetadata: map[string]any{"node_bm25_rank": 1}}
 	vectorOnly := SearchResult{MemoryID: "book", ChunkID: "vector", ChunkMetadata: map[string]any{}}
 
 	results := fuseHierarchyChildren([]SearchResult{sharedVector, vectorOnly}, []SearchResult{sharedLexical})
@@ -64,6 +85,32 @@ func TestFuseHierarchyChildrenCombinesVectorAndLexicalLanes(t *testing.T) {
 	}
 	if results[0].ScoreParts.LiteralScore != 3.2 {
 		t.Fatalf("expected lexical diagnostics to survive fusion, got %#v", results[0])
+	}
+}
+
+func TestSelectRoutedParentsReservesSummaryWithoutDisplacingPooledLane(t *testing.T) {
+	pooled := []parentHit{
+		{ID: "p1", FusionScore: 1},
+		{ID: "p2", FusionScore: 0.9},
+		{ID: "p3", FusionScore: 0.8},
+		{ID: "p4", FusionScore: 0.7},
+	}
+	summaries := []parentHit{
+		{ID: "p1", FusionScore: 1},
+		{ID: "s1", FusionScore: 0.6},
+		{ID: "s2", FusionScore: 0.5},
+	}
+	fused := append(append([]parentHit{}, pooled...), summaries[1:]...)
+
+	selected := selectRoutedParents(pooled, summaries, fused, 4)
+	ids := make(map[string]bool, len(selected))
+	for _, parent := range selected {
+		ids[parent.ID] = true
+	}
+	for _, id := range []string{"p1", "p2", "p3", "s1"} {
+		if !ids[id] {
+			t.Fatalf("expected %q in routed parents, got %#v", id, selected)
+		}
 	}
 }
 

@@ -16,29 +16,33 @@ const (
 )
 
 type bm25Document struct {
-	userKey  string
-	parentID string
-	result   SearchResult
-	terms    map[string]int
-	length   int
+	userKey string
+	nodeID  string
+	result  SearchResult
+	terms   map[string]int
+	length  int
 }
 
 type BM25Index struct {
-	mu       sync.RWMutex
-	docs     map[string]*bm25Document
-	postings map[string]map[string]struct{}
+	mu         sync.RWMutex
+	docs       map[string]*bm25Document
+	postings   map[string]map[string]struct{}
+	memoryDocs map[string]map[string]struct{}
+	nodeDocs   map[string]map[string]struct{}
 }
 
 func NewBM25Index() *BM25Index {
 	return &BM25Index{
-		docs:     map[string]*bm25Document{},
-		postings: map[string]map[string]struct{}{},
+		docs:       map[string]*bm25Document{},
+		postings:   map[string]map[string]struct{}{},
+		memoryDocs: map[string]map[string]struct{}{},
+		nodeDocs:   map[string]map[string]struct{}{},
 	}
 }
 
 func (index *BM25Index) Load(ctx context.Context, db *sql.DB) error {
 	rows, err := db.QueryContext(ctx, `
-		SELECT c.user_key, c.parent_id, c.memory_id, c.id, i.title, c.text, c.context_text, c.metadata_text,
+		SELECT c.user_key, c.node_id, c.memory_id, c.id, i.title, c.text, c.context_text, c.metadata_text,
 			i.kind, i.source_type, i.source_uri, i.tags::text, i.metadata::text,
 			c.metadata::text, i.updated_at
 		FROM memory_chunks c
@@ -64,6 +68,8 @@ func (index *BM25Index) Load(ctx context.Context, db *sql.DB) error {
 	defer index.mu.Unlock()
 	index.docs = map[string]*bm25Document{}
 	index.postings = map[string]map[string]struct{}{}
+	index.memoryDocs = map[string]map[string]struct{}{}
+	index.nodeDocs = map[string]map[string]struct{}{}
 	for _, document := range documents {
 		index.addLocked(document)
 	}
@@ -72,7 +78,7 @@ func (index *BM25Index) Load(ctx context.Context, db *sql.DB) error {
 
 func (index *BM25Index) RefreshMemory(ctx context.Context, db *sql.DB, userKey, memoryID string) error {
 	rows, err := db.QueryContext(ctx, `
-		SELECT c.user_key, c.parent_id, c.memory_id, c.id, i.title, c.text, c.context_text, c.metadata_text,
+		SELECT c.user_key, c.node_id, c.memory_id, c.id, i.title, c.text, c.context_text, c.metadata_text,
 			i.kind, i.source_type, i.source_uri, i.tags::text, i.metadata::text,
 			c.metadata::text, i.updated_at
 		FROM memory_chunks c
@@ -111,23 +117,36 @@ func (index *BM25Index) RemoveMemory(memoryID string) {
 }
 
 func (index *BM25Index) Search(userKey string, req SearchRequest, limit int) []SearchResult {
-	return index.search(userKey, req, limit, nil, 0)
+	return index.search(userKey, req, limit, nil, nil, 0)
 }
 
-func (index *BM25Index) SearchParents(userKey string, req SearchRequest, parentIDs []string, perParentLimit int) []SearchResult {
-	if len(parentIDs) == 0 || perParentLimit <= 0 {
+func (index *BM25Index) SearchNodes(userKey string, req SearchRequest, nodeIDs []string, perNodeLimit int) []SearchResult {
+	if len(nodeIDs) == 0 || perNodeLimit <= 0 {
 		return []SearchResult{}
 	}
-	allowedParents := make(map[string]bool, len(parentIDs))
-	for _, parentID := range parentIDs {
-		if parentID = strings.TrimSpace(parentID); parentID != "" {
-			allowedParents[parentID] = true
+	allowedNodes := make(map[string]bool, len(nodeIDs))
+	for _, nodeID := range nodeIDs {
+		if nodeID = strings.TrimSpace(nodeID); nodeID != "" {
+			allowedNodes[nodeID] = true
 		}
 	}
-	return index.search(userKey, req, len(allowedParents)*perParentLimit, allowedParents, perParentLimit)
+	return index.search(userKey, req, len(allowedNodes)*perNodeLimit, allowedNodes, nil, perNodeLimit)
 }
 
-func (index *BM25Index) search(userKey string, req SearchRequest, limit int, allowedParents map[string]bool, perParentLimit int) []SearchResult {
+func (index *BM25Index) SearchMemories(userKey string, req SearchRequest, memoryIDs []string, perMemoryLimit int) []SearchResult {
+	if len(memoryIDs) == 0 || perMemoryLimit <= 0 {
+		return []SearchResult{}
+	}
+	allowedMemories := make(map[string]bool, len(memoryIDs))
+	for _, memoryID := range memoryIDs {
+		if memoryID = strings.TrimSpace(memoryID); memoryID != "" {
+			allowedMemories[memoryID] = true
+		}
+	}
+	return index.search(userKey, req, len(allowedMemories)*perMemoryLimit, nil, allowedMemories, perMemoryLimit)
+}
+
+func (index *BM25Index) search(userKey string, req SearchRequest, limit int, allowedNodes, allowedMemories map[string]bool, perGroupLimit int) []SearchResult {
 	terms := literalRecallTerms(req.Query)
 	if len(terms) == 0 || limit <= 0 {
 		return []SearchResult{}
@@ -141,15 +160,30 @@ func (index *BM25Index) search(userKey string, req SearchRequest, limit int, all
 	defer index.mu.RUnlock()
 	eligible := make(map[string]*bm25Document)
 	totalLength := 0
-	for id, document := range index.docs {
+	addEligible := func(id string, document *bm25Document) {
 		if document.userKey != userKey || !bm25DocumentMatches(document.result, req, timeFilter, scope, collection) {
-			continue
+			return
 		}
-		if allowedParents != nil && !allowedParents[document.parentID] {
-			continue
+		if allowedNodes != nil && !allowedNodes[document.nodeID] {
+			return
+		}
+		if allowedMemories != nil && !allowedMemories[document.result.MemoryID] {
+			return
 		}
 		eligible[id] = document
 		totalLength += document.length
+	}
+	documentIDs := index.documentIDsLocked(allowedNodes, allowedMemories)
+	if documentIDs == nil {
+		for id, document := range index.docs {
+			addEligible(id, document)
+		}
+	} else {
+		for id := range documentIDs {
+			if document := index.docs[id]; document != nil {
+				addEligible(id, document)
+			}
+		}
 	}
 	if len(eligible) == 0 {
 		return []SearchResult{}
@@ -206,24 +240,29 @@ func (index *BM25Index) search(userKey string, req SearchRequest, limit int, all
 	})
 
 	groupLimit := searchResultRankLimit(req)
-	if allowedParents != nil {
-		groupLimit = perParentLimit
+	if allowedNodes != nil || allowedMemories != nil {
+		groupLimit = perGroupLimit
 	}
 	countByGroup := map[string]int{}
 	results := make([]SearchResult, 0, limit)
 	for _, item := range scores {
 		groupID := item.document.result.MemoryID
-		if allowedParents != nil {
-			groupID = item.document.parentID
+		if allowedNodes != nil {
+			groupID = item.document.nodeID
 		}
 		if countByGroup[groupID] >= groupLimit {
 			continue
 		}
 		result := item.document.result
-		if allowedParents != nil {
+		if allowedNodes != nil || allowedMemories != nil {
 			result.ChunkMetadata = cloneAnyMap(result.ChunkMetadata)
-			result.ChunkMetadata["parent_id"] = item.document.parentID
-			result.ChunkMetadata["parent_bm25_rank"] = countByGroup[groupID] + 1
+		}
+		if allowedNodes != nil {
+			result.ChunkMetadata["node_id"] = item.document.nodeID
+			result.ChunkMetadata["node_bm25_rank"] = countByGroup[groupID] + 1
+		}
+		if allowedMemories != nil {
+			result.ChunkMetadata["conditioned_rank"] = countByGroup[groupID] + 1
 		}
 		result.Score = item.score
 		result.Similarity = 0
@@ -244,12 +283,15 @@ func (index *BM25Index) search(userKey string, req SearchRequest, limit int, all
 }
 
 func (index *BM25Index) addLocked(document *bm25Document) {
-	index.docs[document.result.ChunkID] = document
+	id := document.result.ChunkID
+	index.docs[id] = document
+	addBM25Membership(index.memoryDocs, document.result.MemoryID, id)
+	addBM25Membership(index.nodeDocs, document.nodeID, id)
 	for term := range document.terms {
 		if index.postings[term] == nil {
 			index.postings[term] = map[string]struct{}{}
 		}
-		index.postings[term][document.result.ChunkID] = struct{}{}
+		index.postings[term][id] = struct{}{}
 	}
 }
 
@@ -264,18 +306,61 @@ func (index *BM25Index) removeMemoryLocked(memoryID string) {
 				delete(index.postings, term)
 			}
 		}
+		removeBM25Membership(index.memoryDocs, document.result.MemoryID, id)
+		removeBM25Membership(index.nodeDocs, document.nodeID, id)
 		delete(index.docs, id)
+	}
+}
+
+func (index *BM25Index) documentIDsLocked(allowedNodes, allowedMemories map[string]bool) map[string]struct{} {
+	if allowedNodes == nil && allowedMemories == nil {
+		return nil
+	}
+	result := map[string]struct{}{}
+	if allowedNodes != nil {
+		for nodeID := range allowedNodes {
+			for id := range index.nodeDocs[nodeID] {
+				result[id] = struct{}{}
+			}
+		}
+		return result
+	}
+	for memoryID := range allowedMemories {
+		for id := range index.memoryDocs[memoryID] {
+			result[id] = struct{}{}
+		}
+	}
+	return result
+}
+
+func addBM25Membership(groups map[string]map[string]struct{}, groupID, documentID string) {
+	if groupID == "" {
+		return
+	}
+	if groups[groupID] == nil {
+		groups[groupID] = map[string]struct{}{}
+	}
+	groups[groupID][documentID] = struct{}{}
+}
+
+func removeBM25Membership(groups map[string]map[string]struct{}, groupID, documentID string) {
+	if groupID == "" {
+		return
+	}
+	delete(groups[groupID], documentID)
+	if len(groups[groupID]) == 0 {
+		delete(groups, groupID)
 	}
 }
 
 func scanBM25Document(rows interface{ Scan(...any) error }) (*bm25Document, error) {
 	var result SearchResult
 	var userKey string
-	var parentID sql.NullString
+	var nodeID sql.NullString
 	var tagsRaw, metadataRaw, chunkMetadataRaw string
 	if err := rows.Scan(
 		&userKey,
-		&parentID,
+		&nodeID,
 		&result.MemoryID,
 		&result.ChunkID,
 		&result.Title,
@@ -296,7 +381,7 @@ func scanBM25Document(rows interface{ Scan(...any) error }) (*bm25Document, erro
 	result.Metadata = parseMap(metadataRaw)
 	result.ChunkMetadata = parseMap(chunkMetadataRaw)
 	terms := bm25TermFrequencies(bm25SearchText(result))
-	return &bm25Document{userKey: userKey, parentID: parentID.String, result: result, terms: terms, length: termCount(terms)}, nil
+	return &bm25Document{userKey: userKey, nodeID: nodeID.String, result: result, terms: terms, length: termCount(terms)}, nil
 }
 
 func cloneAnyMap(source map[string]any) map[string]any {
@@ -352,18 +437,6 @@ func bm25DocumentMatches(result SearchResult, req SearchRequest, timeFilter, sco
 	}
 	if collection != "" && stringMapValue(result.Metadata, "collection") != collection {
 		return false
-	}
-	if len(req.SourceTitles) > 0 {
-		matched := false
-		for _, title := range req.SourceTitles {
-			if strings.EqualFold(strings.TrimSpace(result.Title), strings.TrimSpace(title)) {
-				matched = true
-				break
-			}
-		}
-		if !matched {
-			return false
-		}
 	}
 	return !strings.Contains(result.SourceURI, "/.trash/")
 }

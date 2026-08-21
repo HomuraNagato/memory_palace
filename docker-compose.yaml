@@ -28,20 +28,15 @@ services:
       - MEMORY_PALACE_CONTEXTUALIZER_URL=${MEMORY_PALACE_CONTEXTUALIZER_URL:-http://127.0.0.1:5014/v1/chat/completions}
       - MEMORY_PALACE_CONTEXTUALIZER_MODEL=${MEMORY_PALACE_CONTEXTUALIZER_MODEL:-auto}
       - MEMORY_PALACE_CONTEXTUALIZER_BATCH_SIZE=${MEMORY_PALACE_CONTEXTUALIZER_BATCH_SIZE:-4}
-      - MEMORY_PALACE_QUERY_REWRITER_URL=${MEMORY_PALACE_QUERY_REWRITER_URL:-http://127.0.0.1:5014/v1/chat/completions}
-      - MEMORY_PALACE_QUERY_REWRITER_MODEL=${MEMORY_PALACE_QUERY_REWRITER_MODEL:-auto}
-      - MEMORY_PALACE_QUERY_REWRITER_TIMEOUT_MS=${MEMORY_PALACE_QUERY_REWRITER_TIMEOUT_MS:-4000}
       - MEMORY_PALACE_RERANKER_URL=${MEMORY_PALACE_RERANKER_URL:-http://127.0.0.1:5022}
+      - MEMORY_PALACE_DISABLE_SUMMARY_ROUTING=${MEMORY_PALACE_DISABLE_SUMMARY_ROUTING:-false}
+      - MEMORY_PALACE_DISABLE_FIRST_PHASE_SCORING=${MEMORY_PALACE_DISABLE_FIRST_PHASE_SCORING:-false}
+      - MEMORY_PALACE_DISABLE_PASSAGE_WINDOWS=${MEMORY_PALACE_DISABLE_PASSAGE_WINDOWS:-false}
+      # Fixed deployment tenant. Request headers cannot override this key.
+      - MEMORY_PALACE_USER_KEY=${MEMORY_PALACE_USER_KEY:-nagato}
       # Watch root syntax: user=/path|scope=memories|collection=obsidian,/path|scope=library|collection=genshin
-      - MEMORY_PALACE_WATCH_DIRS=${MEMORY_PALACE_WATCH_DIRS:-local=/home/src/data/obsidian|scope=memories|collection=obsidian,/home/src/data/library|scope=library|collection=library}
+      - MEMORY_PALACE_WATCH_DIRS=${MEMORY_PALACE_WATCH_DIRS:-nagato=/home/src/data/obsidian|scope=memories|collection=obsidian,/home/src/data/library|scope=library|collection=library}
     command: ["go", "run", "."]
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
 
 volumes:
   memory_palace_vol:

@@ -18,6 +18,13 @@ Memory Palace uses host networking because its dependencies are exposed on
 localhost. Beemo starts the reasoning, embedding, and reranker services first,
 then Memory Palace, the orchestrator, and the UI.
 
+Indexed sources use recursive document, chapter/page, section, and passage
+structure. Global lookup and overview retrieval plans search this hierarchy,
+then return raw supporting passages as evidence. Beemo may make one bounded
+follow-up retrieval when the first evidence set is insufficient. See
+[`docs/corpus-architecture.md`](docs/corpus-architecture.md) for the ownership
+and execution details.
+
 ## Prerequisites
 
 - Linux with Git, Go, Docker, and Docker Compose.
@@ -63,6 +70,7 @@ At minimum, set these values:
 ```dotenv
 MEMORY_PALACE_OBSIDIAN_PATH=/absolute/path/to/notes
 MEMORY_PALACE_LIBRARY_PATH=/absolute/path/to/library
+MEMORY_PALACE_USER_KEY=user-a
 MEMORY_PALACE_WATCH_DIRS=user-a=/home/src/data/obsidian|scope=memories|collection=obsidian,/home/src/data/library|scope=library|collection=library
 MEMORY_PALACE_DATABASE_URL=host=127.0.0.1 port=5438 dbname=pensieve user=postgres password=change-me sslmode=disable
 ```
@@ -73,27 +81,33 @@ paths, not the original host paths. `.env` is ignored by Git.
 
 ### User Keys And Watch Roots
 
-Give each person or application a stable user key and separate watch roots.
-The key partitions rows in PostgreSQL and selects which roots a scan may read.
-Multiple user mappings are separated by semicolons:
+Give each Beemo installation a stable user key. The key partitions every row
+in PostgreSQL, owns all API operations made by that Memory Palace instance,
+and selects the watch roots it may scan:
 
 ```dotenv
-MEMORY_PALACE_WATCH_DIRS=user-a=/home/src/data/user-a-notes|scope=memories|collection=notes;user-b=/home/src/data/user-b-notes|scope=memories|collection=notes
+MEMORY_PALACE_USER_KEY=user-a
+MEMORY_PALACE_WATCH_DIRS=user-a=/home/src/data/obsidian|scope=memories|collection=obsidian,/home/src/data/library|scope=library|collection=library
 ```
 
-Every container path in that setting must have a corresponding read-only bind
-mount in `docker-compose.yaml`. Do not mount another person's private tree under
-your user key.
+The key prefix in `MEMORY_PALACE_WATCH_DIRS` must match
+`MEMORY_PALACE_USER_KEY`. A mismatch fails startup instead of silently scanning
+the wrong namespace. Every container path must have a corresponding read-only
+bind mount in `docker-compose.yaml`.
 
-User keys provide namespacing, not authentication. A direct API caller chooses
-the key with the `X-Memory-User-Key` header. Beemo sends the value configured as
-`MEMORY_PALACE_USER_KEY`.
+Run one Memory Palace instance per person. For example, Garnetmoon uses
+`nagato`, while Kim's installation can use:
 
-The current Beemo orchestrator has one default user key per running deployment.
-Requests can override it with the `memory_user_key` option, but the current UI
-does not select a user identity automatically. A shared multi-user UI therefore
-needs identity-to-key routing before its namespaces should be treated as a
-security boundary.
+```dotenv
+MEMORY_PALACE_USER_KEY=kimichuwu
+MEMORY_PALACE_WATCH_DIRS=kimichuwu=/home/src/data/obsidian|scope=memories|collection=obsidian,/home/src/data/library|scope=library|collection=library
+```
+
+When `MEMORY_PALACE_USER_KEY` is configured, request headers and query
+parameters cannot override it. The older `X-Memory-User-Key` behavior remains
+available only when the fixed key is unset, for development and migration
+tools. User keys provide application-level separation; a future shared public
+service should additionally use authentication and PostgreSQL RLS.
 
 ## Configure Beemo
 
@@ -104,7 +118,7 @@ cd ../beemo-project
 cp .env.example .env
 ```
 
-Add or update:
+Add or update the same key used by that installation's Memory Palace:
 
 ```dotenv
 MEMORY_PALACE_USER_KEY=user-a
@@ -183,6 +197,14 @@ cd ../memory_palace
 docker compose up -d --build memory_palace
 docker compose logs -f --tail 100 memory_palace
 ```
+
+## Documentation
+
+- [Search North Star](docs/search-north-star.md) records the retrieval design
+  principles, current quality gap, experiment priorities, and evaluation
+  guardrails for memories, books, and textbooks.
+- [Retrieval Evaluation](eval/search_eval.md) defines the executable question,
+  evidence, answer, and abstention contract.
 
 ## Optional C++ Tooling
 
