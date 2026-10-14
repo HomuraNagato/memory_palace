@@ -14,6 +14,7 @@ import (
 	"html"
 	"io"
 	"log"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
@@ -46,10 +47,13 @@ const (
 	libraryChunksPerDoc        = 6
 	literalTitleSeedChunks     = 3
 	contentHashVersion         = "memory-palace-retrieval-context-v19-separate-parent-vectors"
+	pdfContentHashVersion      = "memory-palace-retrieval-context-v21-structured-pdf-events"
 	defaultMemoryScope         = "memories"
 	searchModeSemantic         = "semantic"
 	searchModeLiteral          = "literal"
 	searchModeHybrid           = "hybrid"
+	coreContextSourceType      = "beemo_core"
+	coreContextSourceURI       = "beemo://core-context"
 )
 
 type Server struct {
@@ -126,6 +130,11 @@ type MemoryItem struct {
 	UpdatedAt  time.Time      `json:"updated_at"`
 }
 
+type CoreContext struct {
+	Body      string    `json:"body"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
 type MemorySummary struct {
 	ID         string         `json:"id"`
 	Kind       string         `json:"kind"`
@@ -137,6 +146,18 @@ type MemorySummary struct {
 	Metadata   map[string]any `json:"metadata"`
 	CreatedAt  time.Time      `json:"created_at"`
 	UpdatedAt  time.Time      `json:"updated_at"`
+}
+
+type ReaderDocument struct {
+	ID     string `json:"id"`
+	Title  string `json:"title"`
+	Format string `json:"format"`
+}
+
+type sourceDocument struct {
+	SourceType string
+	SourceURI  string
+	SourcePath string
 }
 
 type SearchResult struct {
@@ -179,13 +200,14 @@ type MemoryListResponse struct {
 }
 
 type UpsertMemoryRequest struct {
-	Kind       string         `json:"kind"`
-	SourceType string         `json:"source_type"`
-	SourceURI  string         `json:"source_uri"`
-	Title      string         `json:"title"`
-	Body       string         `json:"body"`
-	Tags       []string       `json:"tags"`
-	Metadata   map[string]any `json:"metadata"`
+	Kind       string             `json:"kind"`
+	SourceType string             `json:"source_type"`
+	SourceURI  string             `json:"source_uri"`
+	Title      string             `json:"title"`
+	Body       string             `json:"body"`
+	Tags       []string           `json:"tags"`
+	Metadata   map[string]any     `json:"metadata"`
+	Structure  *documentStructure `json:"-"`
 }
 
 type SearchRequest struct {
@@ -307,6 +329,7 @@ func main() {
 	mux.HandleFunc("/v1/search", server.handleSearch)
 	mux.HandleFunc("/v1/retrieve/traces/", server.handleRetrieveTrace)
 	mux.HandleFunc("/v1/retrieve", server.handleRetrieve)
+	mux.HandleFunc("/v1/core-context", server.handleCoreContext)
 	mux.HandleFunc("/v1/memories", server.handleMemories)
 	mux.HandleFunc("/v1/memories/", server.handleMemory)
 	mux.HandleFunc("/v1/ingest/watch-dirs/run", server.handleWatchRun)
@@ -466,6 +489,77 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
+func (s *Server) handleCoreContext(w http.ResponseWriter, r *http.Request) {
+	userKey := s.userKeyFromRequest(r)
+	if strings.TrimSpace(userKey) == "" {
+		writeError(w, http.StatusBadRequest, "user key is required")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		context, err := s.getCoreContext(r.Context(), userKey)
+		if errors.Is(err, sql.ErrNoRows) {
+			writeJSON(w, http.StatusOK, CoreContext{})
+			return
+		}
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, context)
+	case http.MethodPut:
+		var request struct {
+			Body string `json:"body"`
+		}
+		if err := decodeJSON(r, &request); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		context, err := s.putCoreContext(r.Context(), userKey, request.Body)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, context)
+	case http.MethodDelete:
+		if _, err := s.db.ExecContext(r.Context(), `
+			DELETE FROM memory_items
+			WHERE user_key = $1 AND source_type = $2 AND source_uri = $3
+		`, userKey, coreContextSourceType, coreContextSourceURI); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "GET, PUT, or DELETE required")
+	}
+}
+
+func (s *Server) getCoreContext(ctx context.Context, userKey string) (CoreContext, error) {
+	var result CoreContext
+	err := s.db.QueryRowContext(ctx, `
+		SELECT body, updated_at
+		FROM memory_items
+		WHERE user_key = $1 AND source_type = $2 AND source_uri = $3
+	`, userKey, coreContextSourceType, coreContextSourceURI).Scan(&result.Body, &result.UpdatedAt)
+	return result, err
+}
+
+func (s *Server) putCoreContext(ctx context.Context, userKey, body string) (CoreContext, error) {
+	var result CoreContext
+	err := s.db.QueryRowContext(ctx, `
+		INSERT INTO memory_items (
+			id, user_key, kind, source_type, source_uri, title, body, tags, metadata, content_hash
+		) VALUES ($1, $2, 'user_context', $3, $4, 'Core context', $5, '[]'::JSONB, '{}'::JSONB, $6)
+		ON CONFLICT (user_key, source_type, source_uri) DO UPDATE SET
+			body = EXCLUDED.body,
+			content_hash = EXCLUDED.content_hash,
+			updated_at = NOW()
+		RETURNING body, updated_at
+	`, newID(), userKey, coreContextSourceType, coreContextSourceURI, strings.TrimSpace(body), hashText(strings.TrimSpace(body))).Scan(&result.Body, &result.UpdatedAt)
+	return result, err
+}
+
 func (s *Server) handleLegacyQuery(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "POST required")
@@ -521,6 +615,10 @@ func (s *Server) handleMemories(w http.ResponseWriter, r *http.Request) {
 				Limit:      limit,
 				Mode:       r.URL.Query().Get("mode"),
 				TimeFilter: r.URL.Query().Get("time_filter"),
+				ChunkLimitPerSource: parseLimit(
+					r.URL.Query().Get("chunk_limit_per_source"),
+					0,
+				),
 			})
 			if err != nil {
 				writeError(w, http.StatusInternalServerError, err.Error())
@@ -576,6 +674,27 @@ func (s *Server) handleMemory(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, RelatedMemoriesResponse{Items: items})
+		return
+	}
+	if len(parts) > 1 && parts[1] == "source" {
+		s.handleMemorySource(w, r, userKey, id)
+		return
+	}
+	if len(parts) > 1 && parts[1] == "reader" {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "GET required")
+			return
+		}
+		document, err := s.getReaderDocument(r.Context(), userKey, id)
+		if err != nil {
+			status := http.StatusInternalServerError
+			if errors.Is(err, sql.ErrNoRows) {
+				status = http.StatusNotFound
+			}
+			writeError(w, status, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, document)
 		return
 	}
 	switch r.Method {
@@ -634,6 +753,140 @@ func (s *Server) handleMemory(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "unsupported method")
+	}
+}
+
+var (
+	errSourceUnavailable = errors.New("memory source is unavailable")
+	errSourceForbidden   = errors.New("memory source is outside configured watch roots")
+	errSourceUnsupported = errors.New("reader format not supported")
+)
+
+func (s *Server) handleMemorySource(w http.ResponseWriter, r *http.Request, userKey, id string) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		writeError(w, http.StatusMethodNotAllowed, "GET or HEAD required")
+		return
+	}
+	item, err := s.getSourceDocument(r.Context(), userKey, id)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, sql.ErrNoRows) {
+			status = http.StatusNotFound
+		}
+		writeError(w, status, err.Error())
+		return
+	}
+	sourcePath, err := resolveMemorySourcePath(item, s.watchDirs[userKey])
+	if err != nil {
+		status := http.StatusNotFound
+		if errors.Is(err, errSourceForbidden) {
+			status = http.StatusForbidden
+		} else if errors.Is(err, errSourceUnsupported) {
+			status = http.StatusUnsupportedMediaType
+		}
+		writeError(w, status, err.Error())
+		return
+	}
+	if err := serveMemorySourceFile(w, r, sourcePath); err != nil {
+		writeError(w, http.StatusNotFound, errSourceUnavailable.Error())
+	}
+}
+
+func serveMemorySourceFile(w http.ResponseWriter, r *http.Request, sourcePath string) error {
+	file, err := os.Open(sourcePath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return errSourceUnavailable
+	}
+
+	contentType := readerContentType(sourcePath)
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Disposition", mime.FormatMediaType("inline", map[string]string{"filename": filepath.Base(sourcePath)}))
+	etag := fmt.Sprintf("\"%x-%x\"", info.ModTime().UnixNano(), info.Size())
+	w.Header().Set("ETag", etag)
+	if r.Header.Get("If-None-Match") == etag {
+		w.WriteHeader(http.StatusNotModified)
+		return nil
+	}
+	http.ServeContent(w, r, filepath.Base(sourcePath), info.ModTime(), file)
+	return nil
+}
+
+func resolveMemorySourcePath(item sourceDocument, roots []WatchRoot) (string, error) {
+	if item.SourceType != "watch_file" {
+		return "", errSourceUnavailable
+	}
+	sourcePath := strings.TrimSpace(item.SourcePath)
+	if sourcePath == "" && strings.HasPrefix(item.SourceURI, "file://") {
+		sourcePath = strings.TrimPrefix(item.SourceURI, "file://")
+		if decoded, err := url.PathUnescape(sourcePath); err == nil {
+			sourcePath = decoded
+		}
+	}
+	if sourcePath == "" || !readerExtensionSupported(filepath.Ext(sourcePath)) {
+		if sourcePath != "" {
+			return "", errSourceUnsupported
+		}
+		return "", errSourceUnavailable
+	}
+
+	resolvedSource, err := filepath.EvalSymlinks(sourcePath)
+	if err != nil {
+		return "", errSourceUnavailable
+	}
+	resolvedSource, err = filepath.Abs(resolvedSource)
+	if err != nil {
+		return "", errSourceUnavailable
+	}
+	info, err := os.Stat(resolvedSource)
+	if err != nil || !info.Mode().IsRegular() {
+		return "", errSourceUnavailable
+	}
+
+	for _, root := range roots {
+		resolvedRoot, err := filepath.EvalSymlinks(root.Path)
+		if err != nil {
+			continue
+		}
+		resolvedRoot, err = filepath.Abs(resolvedRoot)
+		if err == nil && pathWithinRoot(resolvedRoot, resolvedSource) {
+			return resolvedSource, nil
+		}
+	}
+	return "", errSourceForbidden
+}
+
+func pathWithinRoot(root, candidate string) bool {
+	relative, err := filepath.Rel(root, candidate)
+	if err != nil || filepath.IsAbs(relative) {
+		return false
+	}
+	return relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+}
+
+func readerExtensionSupported(extension string) bool {
+	switch strings.ToLower(strings.TrimSpace(extension)) {
+	case ".pdf", ".epub", ".md", ".markdown":
+		return true
+	default:
+		return false
+	}
+}
+
+func readerContentType(sourcePath string) string {
+	switch strings.ToLower(filepath.Ext(sourcePath)) {
+	case ".pdf":
+		return "application/pdf"
+	case ".epub":
+		return "application/epub+zip"
+	case ".md", ".markdown":
+		return "text/markdown; charset=utf-8"
+	default:
+		return "application/octet-stream"
 	}
 }
 
@@ -890,6 +1143,51 @@ func (s *Server) getMemory(ctx context.Context, userKey, id string) (MemoryItem,
 		WHERE user_key = $1 AND id = $2
 	`, userKey, id)
 	return scanMemoryItem(row)
+}
+
+func (s *Server) getReaderDocument(ctx context.Context, userKey, id string) (ReaderDocument, error) {
+	var document ReaderDocument
+	var sourceURI string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, title, source_uri, COALESCE(metadata->>'file_ext', '')
+		FROM memory_items
+		WHERE user_key = $1 AND id = $2
+	`, userKey, id).Scan(
+		&document.ID,
+		&document.Title,
+		&sourceURI,
+		&document.Format,
+	)
+	if err != nil {
+		return ReaderDocument{}, err
+	}
+	document.Format = readerFormat(document.Format, sourceURI)
+	return document, nil
+}
+
+func readerFormat(format, sourceURI string) string {
+	format = strings.ToLower(strings.TrimSpace(format))
+	if format != "" {
+		return format
+	}
+	if cutoff := strings.IndexAny(sourceURI, "?#"); cutoff >= 0 {
+		sourceURI = sourceURI[:cutoff]
+	}
+	return strings.ToLower(filepath.Ext(sourceURI))
+}
+
+func (s *Server) getSourceDocument(ctx context.Context, userKey, id string) (sourceDocument, error) {
+	var document sourceDocument
+	err := s.db.QueryRowContext(ctx, `
+		SELECT source_type, source_uri, COALESCE(metadata->>'path', '')
+		FROM memory_items
+		WHERE user_key = $1 AND id = $2
+	`, userKey, id).Scan(
+		&document.SourceType,
+		&document.SourceURI,
+		&document.SourcePath,
+	)
+	return document, err
 }
 
 func (s *Server) listMemories(ctx context.Context, userKey, kind, sourceType, scope, collection string, limit int) ([]MemorySummary, error) {
@@ -1436,7 +1734,7 @@ func (s *Server) runWatchDirs(ctx context.Context, userKey string) (WatchRunResp
 				response.Skipped++
 				return nil
 			}
-			body, fileMetadata, err := readWatchFile(ctx, abs)
+			body, fileMetadata, structure, err := readWatchFile(ctx, abs)
 			if err != nil {
 				response.Skipped++
 				return nil
@@ -1506,6 +1804,7 @@ func (s *Server) runWatchDirs(ctx context.Context, userKey string) (WatchRunResp
 				Body:       body,
 				Tags:       []string{"watched"},
 				Metadata:   metadata,
+				Structure:  structure,
 			})
 			if err != nil {
 				log.Printf("memory.watch_file status=error phase=upsert user=%q path=%q title=%q err=%q", userKey, abs, title, err.Error())
@@ -1640,18 +1939,19 @@ func (s *Server) relocateWatchedMemory(ctx context.Context, userKey string, dupl
 	return nil
 }
 
-func readWatchFile(ctx context.Context, path string) (string, map[string]any, error) {
+func readWatchFile(ctx context.Context, path string) (string, map[string]any, *documentStructure, error) {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".pdf":
-		return extractPDFText(ctx, path)
+		return extractPDFDocument(ctx, path)
 	case ".epub":
-		return extractEPUBText(path)
+		body, metadata, err := extractEPUBText(path)
+		return body, metadata, nil, err
 	default:
 		bodyBytes, err := os.ReadFile(path)
 		if err != nil {
-			return "", nil, err
+			return "", nil, nil, err
 		}
-		return strings.TrimSpace(string(bodyBytes)), map[string]any{}, nil
+		return strings.TrimSpace(string(bodyBytes)), map[string]any{}, nil, nil
 	}
 }
 
@@ -1661,8 +1961,8 @@ func extractPDFText(ctx context.Context, path string) (string, map[string]any, e
 	if err != nil {
 		return "", nil, err
 	}
-	body := strings.TrimSpace(string(output))
-	if body == "" {
+	body := strings.TrimRightFunc(string(output), unicode.IsSpace)
+	if strings.TrimSpace(body) == "" {
 		return "", nil, fmt.Errorf("pdf text extraction returned no text")
 	}
 	return body, map[string]any{
@@ -2137,7 +2437,11 @@ func chunkText(text string) []string {
 
 func chunksForRequest(req UpsertMemoryRequest) []textChunk {
 	if strings.EqualFold(stringMapValue(req.Metadata, "file_ext"), ".pdf") {
-		return chunkSectionedTextWithMetadata(req.Body, "page")
+		fallback := chunkSectionedTextWithMetadata(req.Body, "page")
+		if req.Structure != nil {
+			return applyDocumentStructureToChunks(fallback, *req.Structure)
+		}
+		return fallback
 	}
 	if strings.EqualFold(stringMapValue(req.Metadata, "file_ext"), ".epub") {
 		return chunkSectionedTextWithMetadata(req.Body, "chapter")
@@ -2306,6 +2610,9 @@ func metadataTextForChunk(req UpsertMemoryRequest, chunk textChunk, index int, c
 	}
 	if heading := stringMapValue(chunk.Metadata, "heading"); heading != "" {
 		parts = append(parts, "Heading: "+heading)
+	}
+	if role := stringMapValue(chunk.Metadata, "semantic_role"); role != "" {
+		parts = append(parts, "Content role: "+role)
 	}
 	entities := mentionedEntitiesForChunk(req, chunk)
 	if len(entities) > 0 {
@@ -2918,8 +3225,12 @@ func hashText(text string) string {
 }
 
 func contentHashFor(title, sourceURI, body string, extraParts ...string) string {
+	version := contentHashVersion
+	if strings.EqualFold(filepath.Ext(strings.TrimPrefix(sourceURI, "file://")), ".pdf") {
+		version = pdfContentHashVersion
+	}
 	parts := []string{
-		contentHashVersion,
+		version,
 		strings.TrimSpace(title),
 		strings.TrimSpace(sourceURI),
 		body,

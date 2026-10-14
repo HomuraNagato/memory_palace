@@ -77,6 +77,10 @@ func buildParentNodes(req UpsertMemoryRequest, chunks []textChunk) ([]retrievalP
 			if !ok {
 				currentIndex = len(parents)
 				byPath[path] = currentIndex
+				metadata := cloneMap(part.metadata)
+				metadata["node_type"] = part.nodeType
+				metadata["node_key"] = path
+				metadata["label"] = part.label
 				parents = append(parents, retrievalParentNode{
 					ID:       newID(),
 					ParentID: parents[parentIndex].ID,
@@ -84,7 +88,7 @@ func buildParentNodes(req UpsertMemoryRequest, chunks []textChunk) ([]retrievalP
 					NodeKey:  path,
 					Depth:    parents[parentIndex].Depth + 1,
 					Ordinal:  currentIndex,
-					Metadata: map[string]any{"node_type": part.nodeType, "node_key": path, "label": part.label},
+					Metadata: metadata,
 				})
 				byID[parents[currentIndex].ID] = currentIndex
 			}
@@ -126,10 +130,14 @@ type corpusNodePathPart struct {
 	nodeType string
 	nodeKey  string
 	label    string
+	metadata map[string]any
 }
 
 func nodePathForChunk(chunk textChunk) []corpusNodePathPart {
 	parts := make([]corpusNodePathPart, 0, 3)
+	if structured := structuredNodePath(chunk.Metadata["structure_path"]); len(structured) > 0 {
+		return structured
+	}
 	if chapter := metadataValue(chunk.Metadata, "chapter"); chapter != "" {
 		parts = append(parts, corpusNodePathPart{nodeType: "chapter", nodeKey: chapter, label: "Chapter " + chapter})
 	} else if page := metadataValue(chunk.Metadata, "page"); page != "" {
@@ -137,6 +145,39 @@ func nodePathForChunk(chunk textChunk) []corpusNodePathPart {
 	}
 	if heading := stringMapValue(chunk.Metadata, "heading"); heading != "" {
 		parts = append(parts, corpusNodePathPart{nodeType: "section", nodeKey: heading, label: heading})
+	}
+	return parts
+}
+
+func structuredNodePath(value any) []corpusNodePathPart {
+	entries, ok := value.([]map[string]any)
+	if !ok {
+		rawEntries, rawOK := value.([]any)
+		if !rawOK {
+			return nil
+		}
+		entries = make([]map[string]any, 0, len(rawEntries))
+		for _, raw := range rawEntries {
+			entry, entryOK := raw.(map[string]any)
+			if entryOK {
+				entries = append(entries, entry)
+			}
+		}
+	}
+	parts := make([]corpusNodePathPart, 0, len(entries))
+	for _, entry := range entries {
+		nodeType := stringMapValue(entry, "node_type")
+		nodeKey := stringMapValue(entry, "node_key")
+		label := stringMapValue(entry, "label")
+		if nodeType == "" || nodeKey == "" || label == "" {
+			continue
+		}
+		parts = append(parts, corpusNodePathPart{
+			nodeType: nodeType,
+			nodeKey:  nodeKey,
+			label:    label,
+			metadata: cloneMap(entry),
+		})
 	}
 	return parts
 }

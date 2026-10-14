@@ -178,6 +178,12 @@ type RetrieveDiagnostics struct {
 	WindowCandidateCount       int      `json:"window_candidate_count"`
 	ConditionedCandidateCount  int      `json:"conditioned_candidate_count"`
 	ConditionedDepths          []int    `json:"conditioned_depths,omitempty"`
+	StructuralTargetCount      int      `json:"structural_target_count,omitempty"`
+	StructuredCandidateCount   int      `json:"structured_candidate_count,omitempty"`
+	StructuredDocumentCount    int      `json:"structured_document_count,omitempty"`
+	StructuredDocumentScope    string   `json:"structured_document_scope,omitempty"`
+	StructuredRoleConstrained  bool     `json:"structured_role_constrained,omitempty"`
+	StructuralFallback         string   `json:"structural_fallback,omitempty"`
 	CandidateCount             int      `json:"candidate_count"`
 	RerankCandidateCount       int      `json:"rerank_candidate_count"`
 	SelectedCount              int      `json:"selected_count"`
@@ -187,6 +193,7 @@ type RetrieveDiagnostics struct {
 	WindowSearchMs             int64    `json:"window_search_ms,omitempty"`
 	DocumentRootSearchMs       int64    `json:"document_root_search_ms,omitempty"`
 	ConditionedSearchMs        int64    `json:"conditioned_search_ms,omitempty"`
+	StructuredSearchMs         int64    `json:"structured_search_ms,omitempty"`
 	SearchMs                   int64    `json:"search_ms,omitempty"`
 	RerankMs                   int64    `json:"rerank_ms,omitempty"`
 	ExpandMs                   int64    `json:"expand_ms,omitempty"`
@@ -254,8 +261,11 @@ func (s *Server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.storeRetrieveTrace(req.RequestID, response)
+	if !req.TraceStages {
+		response.StageTrace = nil
+	}
 	log.Printf(
-		"memory.retrieve request_id=%q status=ok user=%q query=%q query_chars=%d request_limit=%d request_candidate_limit=%d specs=%d global_candidates=%d window_matches=%d window_expanded_leaves=%d window_candidates=%d root_candidates=%d root_selected=%d documents=%d conditioned_candidates=%d candidates=%d selected=%d global_search_ms=%d window_search_ms=%d root_search_ms=%d conditioned_search_ms=%d search_ms=%d rerank_ms=%d total_ms=%d reranker=%q model=%q",
+		"memory.retrieve request_id=%q status=ok user=%q query=%q query_chars=%d request_limit=%d request_candidate_limit=%d specs=%d global_candidates=%d window_matches=%d window_expanded_leaves=%d window_candidates=%d root_candidates=%d root_selected=%d documents=%d conditioned_candidates=%d structural_targets=%d structured_candidates=%d structural_fallback=%q candidates=%d selected=%d global_search_ms=%d window_search_ms=%d root_search_ms=%d conditioned_search_ms=%d structured_search_ms=%d search_ms=%d rerank_ms=%d total_ms=%d reranker=%q model=%q",
 		req.RequestID,
 		userKey,
 		req.Query,
@@ -271,12 +281,16 @@ func (s *Server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 		response.Diagnostics.DocumentRootSelectedCount,
 		response.Diagnostics.SelectedDocumentCount,
 		response.Diagnostics.ConditionedCandidateCount,
+		response.Diagnostics.StructuralTargetCount,
+		response.Diagnostics.StructuredCandidateCount,
+		response.Diagnostics.StructuralFallback,
 		response.Diagnostics.CandidateCount,
 		response.Diagnostics.SelectedCount,
 		response.Diagnostics.GlobalSearchMs,
 		response.Diagnostics.WindowSearchMs,
 		response.Diagnostics.DocumentRootSearchMs,
 		response.Diagnostics.ConditionedSearchMs,
+		response.Diagnostics.StructuredSearchMs,
 		response.Diagnostics.SearchMs,
 		response.Diagnostics.RerankMs,
 		response.Diagnostics.TotalMs,
@@ -371,17 +385,24 @@ func (s *Server) retrieve(ctx context.Context, userKey string, req RetrieveReque
 	}
 	passageDocuments := rankFirstPhaseDocuments(retrievedCandidates, plan)
 	documents := mergeDocumentRoutes(passageDocuments, rootResult.hits, firstPhaseDocumentLimit)
-	conditioned := s.retrieveConditionedCandidates(ctx, userKey, req, documents)
-	candidates := assembleRerankPoolWithScoring(
+	conditionedChannel := make(chan conditionedRetrieval, 1)
+	structuredChannel := make(chan structuredRetrieval, 1)
+	go func() { conditionedChannel <- s.retrieveConditionedCandidates(ctx, userKey, req, documents) }()
+	go func() { structuredChannel <- s.retrieveStructuredCandidates(ctx, userKey, req, documents) }()
+	conditioned := <-conditionedChannel
+	structured := <-structuredChannel
+	candidates := assembleGuardedRerankPool(
 		retrievedCandidates,
 		conditioned.Candidates,
+		structured.Candidates,
 		documents,
 		rerankCandidateLimit,
 		!s.firstPhaseDisabled,
 	)
-	if len(conditioned.Candidates) == 0 {
+	if len(conditioned.Candidates) == 0 && len(structured.Candidates) == 0 {
 		candidates = selectFirstPhaseCandidates(retrievedCandidates, rerankCandidateLimit, plan)
 	}
+	logRetrieveDocumentFlow(req.RequestID, documents, retrievedCandidates, conditioned.Candidates, candidates)
 	searchMs := time.Since(searchStart).Milliseconds()
 	var selection retrieveSelection
 	if req.CandidateOnly {
@@ -402,6 +423,7 @@ func (s *Server) retrieve(ctx context.Context, userKey string, req RetrieveReque
 			candidates = windowedCandidates
 			log.Printf("memory.retrieve.rerank_windows request_id=%q status=ok candidates=%d ms=%d", req.RequestID, len(candidates), time.Since(windowStart).Milliseconds())
 		}
+		logRetrieveCandidates("rerank_input", req.RequestID, candidates, false)
 		selection = s.selectRetrieveSources(ctx, query, candidates, sourceLimit, rerankCandidateLimit, plan, req.RequestID)
 	}
 	sources := selection.Sources
@@ -417,10 +439,17 @@ func (s *Server) retrieve(ctx context.Context, userKey string, req RetrieveReque
 	diagnostics.WindowSearchMs = retrieved.Windows.ElapsedMs
 	diagnostics.ConditionedCandidateCount = len(conditioned.Candidates)
 	diagnostics.ConditionedDepths = conditionedBudgetLimits(conditioned.Budgets)
+	diagnostics.StructuralTargetCount = len(structured.Targets)
+	diagnostics.StructuredCandidateCount = len(structured.Candidates)
+	diagnostics.StructuredDocumentCount = structured.DocumentCount
+	diagnostics.StructuredDocumentScope = structured.DocumentScope
+	diagnostics.StructuredRoleConstrained = structured.RoleConstrained
+	diagnostics.StructuralFallback = structured.Fallback
 	diagnostics.SelectedDocumentCount = minInt(firstPhaseDocumentLimit, len(documents))
 	diagnostics.GlobalSearchMs = globalSearchMs
 	diagnostics.DocumentRootSearchMs = rootResult.elapsedMs
 	diagnostics.ConditionedSearchMs = conditioned.ElapsedMs
+	diagnostics.StructuredSearchMs = structured.ElapsedMs
 	expandStart := time.Now()
 	expandedSources, expandErr := s.expandRetrieveSources(ctx, userKey, sources, nearbyChunkWindow)
 	if expandErr != nil {
@@ -429,26 +458,25 @@ func (s *Server) retrieve(ctx context.Context, userKey string, req RetrieveReque
 		sources = expandedSources
 		diagnostics.ExpandMs = time.Since(expandStart).Milliseconds()
 	}
+	logRetrieveCandidates("selected_sources", req.RequestID, sources, true)
 	diagnostics.QueryCount = len(specs)
 	diagnostics.Plan = plan
 	diagnostics.SearchMs = searchMs
 	diagnostics.TotalMs = time.Since(totalStart).Milliseconds()
-	var stageTrace *RetrieveStageTrace
-	if req.TraceStages {
-		traceFinal := sources
-		if req.CandidateOnly {
-			traceFinal = nil
-		}
-		stageTrace = buildRetrieveStageTrace(
-			retrievedCandidates,
-			documentRepresentativeCandidates(documents, firstPhaseDocumentLimit),
-			rootRoutedRepresentativeCandidates(documents, conditioned.Candidates),
-			conditioned.Candidates,
-			candidates,
-			selection.Reranked,
-			traceFinal,
-		)
+	traceFinal := sources
+	if req.CandidateOnly {
+		traceFinal = nil
 	}
+	stageTrace := buildRetrieveStageTrace(
+		retrievedCandidates,
+		documentRepresentativeCandidates(documents, firstPhaseDocumentLimit),
+		rootRoutedRepresentativeCandidates(documents, conditioned.Candidates),
+		conditioned.Candidates,
+		structured.Candidates,
+		candidates,
+		selection.Reranked,
+		traceFinal,
+	)
 	return RetrieveResponse{
 		Query:       query,
 		Specs:       specs,
@@ -457,6 +485,102 @@ func (s *Server) retrieve(ctx context.Context, userKey string, req RetrieveReque
 		Diagnostics: diagnostics,
 		StageTrace:  stageTrace,
 	}, nil
+}
+
+type retrieveDocumentLog struct {
+	Rank                  int     `json:"rank"`
+	Title                 string  `json:"title"`
+	MemoryID              string  `json:"memory_id"`
+	Score                 float64 `json:"score"`
+	RootRank              int     `json:"root_rank,omitempty"`
+	RootSimilarity        float64 `json:"root_similarity,omitempty"`
+	GlobalCandidates      int     `json:"global_candidates"`
+	ConditionedCandidates int     `json:"conditioned_candidates"`
+	RerankCandidates      int     `json:"rerank_candidates"`
+}
+
+type retrieveCandidateLog struct {
+	Rank             int      `json:"rank"`
+	Title            string   `json:"title"`
+	Page             int      `json:"page,omitempty"`
+	Chapter          int      `json:"chapter,omitempty"`
+	Chunk            int      `json:"chunk,omitempty"`
+	StructuralTarget string   `json:"structural_target,omitempty"`
+	StructuralRole   string   `json:"structural_role,omitempty"`
+	TargetConfidence float64  `json:"target_confidence,omitempty"`
+	FirstPhaseScore  float64  `json:"first_phase_score,omitempty"`
+	RerankScore      *float64 `json:"rerank_score,omitempty"`
+	Preview          string   `json:"preview,omitempty"`
+}
+
+func logRetrieveDocumentFlow(requestID string, documents []firstPhaseDocument, global, conditioned, rerank []CandidateSource) {
+	counts := func(candidates []CandidateSource) map[string]int {
+		result := make(map[string]int)
+		for _, candidate := range candidates {
+			result[candidate.MemoryID]++
+		}
+		return result
+	}
+	globalCounts := counts(global)
+	conditionedCounts := counts(conditioned)
+	rerankCounts := counts(rerank)
+	titles := make(map[string]string)
+	for _, candidates := range [][]CandidateSource{global, conditioned, rerank} {
+		for _, candidate := range candidates {
+			if titles[candidate.MemoryID] == "" {
+				titles[candidate.MemoryID] = candidate.Title
+			}
+		}
+	}
+	entries := make([]retrieveDocumentLog, 0, len(documents))
+	for index, document := range documents {
+		title := titles[document.memoryID]
+		if len(document.candidates) > 0 {
+			title = document.candidates[0].Title
+		}
+		entries = append(entries, retrieveDocumentLog{
+			Rank: index + 1, Title: title, MemoryID: document.memoryID, Score: document.score,
+			RootRank: document.rootRank, RootSimilarity: document.rootSimilarity,
+			GlobalCandidates: globalCounts[document.memoryID], ConditionedCandidates: conditionedCounts[document.memoryID],
+			RerankCandidates: rerankCounts[document.memoryID],
+		})
+	}
+	encoded, err := json.Marshal(entries)
+	if err != nil {
+		log.Printf("memory.retrieve.document_flow request_id=%q status=error err=%q", requestID, err.Error())
+		return
+	}
+	log.Printf("memory.retrieve.document_flow request_id=%q documents=%s", requestID, encoded)
+}
+
+func logRetrieveCandidates(stage, requestID string, candidates []CandidateSource, includePreview bool) {
+	entries := make([]retrieveCandidateLog, 0, len(candidates))
+	for index, candidate := range candidates {
+		entry := retrieveCandidateLog{
+			Rank: index + 1, Title: candidate.Title, FirstPhaseScore: candidate.FirstPhaseScore,
+			RerankScore: candidate.RerankScore,
+		}
+		entry.Page, _ = intMapValue(candidate.ChunkMetadata, "page")
+		entry.Chapter, _ = intMapValue(candidate.ChunkMetadata, "chapter")
+		entry.Chunk, _ = intMapValue(candidate.ChunkMetadata, "chunk_index")
+		entry.StructuralTarget = stringMapValue(candidate.ChunkMetadata, "structural_target_label")
+		entry.StructuralRole = stringMapValue(candidate.ChunkMetadata, "semantic_role")
+		entry.TargetConfidence = floatMapValue(candidate.ChunkMetadata, "structural_target_confidence")
+		if includePreview {
+			preview := candidate.EvidenceText
+			if strings.TrimSpace(preview) == "" {
+				preview = candidate.Text
+			}
+			entry.Preview = truncateRunes(strings.Join(strings.Fields(preview), " "), 180)
+		}
+		entries = append(entries, entry)
+	}
+	encoded, err := json.Marshal(entries)
+	if err != nil {
+		log.Printf("memory.retrieve.%s request_id=%q status=error err=%q", stage, requestID, err.Error())
+		return
+	}
+	log.Printf("memory.retrieve.%s request_id=%q candidates=%s", stage, requestID, encoded)
 }
 
 func (s *Server) addRerankWindows(ctx context.Context, userKey string, candidates []CandidateSource, radius int) ([]CandidateSource, error) {
@@ -684,6 +808,7 @@ func buildRetrieveStageTrace(
 	documentSelection,
 	documentRootSelection,
 	conditioned,
+	structured,
 	rerankPool,
 	reranked,
 	final []CandidateSource,
@@ -703,6 +828,8 @@ func buildRetrieveStageTrace(
 		{name: "hierarchy_summary", candidates: retrieved, match: func(hit RetrievalHit) bool { return hit.Route == "parent" && hit.ParentSummaryRank > 0 }},
 		{name: "conditioned_dense", candidates: conditioned, match: func(hit RetrievalHit) bool { return hit.Route == "conditioned_dense" }},
 		{name: "conditioned_literal", candidates: conditioned, match: func(hit RetrievalHit) bool { return hit.Route == "conditioned_literal" }},
+		{name: "structured_dense", candidates: structured, match: func(hit RetrievalHit) bool { return hit.Route == "structured_dense" }},
+		{name: "structured_literal", candidates: structured, match: func(hit RetrievalHit) bool { return hit.Route == "structured_literal" }},
 	}
 	orderedStages := make([]struct {
 		name       string

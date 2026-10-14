@@ -56,8 +56,8 @@ func TestLoadEvaluationSuite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(loaded.Queries) != 31 {
-		t.Fatalf("expected 31 cases, got %d", len(loaded.Queries))
+	if len(loaded.Queries) != 32 {
+		t.Fatalf("expected 32 cases, got %d", len(loaded.Queries))
 	}
 }
 

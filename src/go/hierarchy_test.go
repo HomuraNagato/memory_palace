@@ -50,6 +50,24 @@ func TestBuildParentNodesNestsSectionsInsideChapters(t *testing.T) {
 	}
 }
 
+func TestBuildParentNodesUsesGenericStructuredPath(t *testing.T) {
+	req := UpsertMemoryRequest{Title: "Manual", SourceURI: "file:///manual.pdf"}
+	chunks := []textChunk{{
+		Text: "Procedure details.",
+		Metadata: map[string]any{"structure_path": []map[string]any{
+			{"node_type": "division", "node_key": "part:1", "label": "Part I", "confidence": 0.98},
+			{"node_type": "section", "node_key": "section:1.2", "label": "1.2 Setup", "confidence": 0.88},
+		}},
+	}}
+	nodes, chunkNodeIDs := buildParentNodes(req, chunks)
+	if len(nodes) != 3 || nodes[1].NodeType != "division" || nodes[2].NodeType != "section" {
+		t.Fatalf("unexpected generic hierarchy: %#v", nodes)
+	}
+	if nodes[2].Metadata["confidence"] != 0.88 || chunkNodeIDs[0] != nodes[2].ID {
+		t.Fatalf("expected structure metadata and leaf attachment, got %#v %#v", nodes[2], chunkNodeIDs)
+	}
+}
+
 func TestRankedMentionedEntitiesKeepsNamesAndFiltersIncidentalWords(t *testing.T) {
 	entities := rankedMentionedEntities("Yes, Mira Voss arrived. Daren waited. Mira Voss answered. Later Daren left.", 8)
 	if !slices.Contains(entities, "Mira Voss") || !slices.Contains(entities, "Daren") {

@@ -32,12 +32,17 @@ func TestBuildRetrieveStageTraceKeepsActiveLaneOrders(t *testing.T) {
 	conditionedAnswer.Retrievals = append(conditionedAnswer.Retrievals,
 		RetrievalHit{Route: "conditioned_literal", Mode: searchModeLiteral, Rank: 1},
 	)
+	structuredAnswer := answer
+	structuredAnswer.Retrievals = append(structuredAnswer.Retrievals,
+		RetrievalHit{Route: "structured_dense", Mode: searchModeSemantic, Rank: 1},
+	)
 
 	trace := buildRetrieveStageTrace(
 		[]CandidateSource{answer, denseFirst, hierarchy},
 		[]CandidateSource{hierarchy},
 		nil,
 		[]CandidateSource{conditionedAnswer},
+		[]CandidateSource{structuredAnswer},
 		[]CandidateSource{hierarchy, conditionedAnswer},
 		[]CandidateSource{answer, hierarchy},
 		[]CandidateSource{answer},
@@ -53,6 +58,7 @@ func TestBuildRetrieveStageTraceKeepsActiveLaneOrders(t *testing.T) {
 	assertTraceStage(t, trace, "hierarchy_pooled", []string{"hierarchy"})
 	assertTraceStage(t, trace, "hierarchy_summary", []string{"hierarchy"})
 	assertTraceStage(t, trace, "conditioned_literal", []string{"answer"})
+	assertTraceStage(t, trace, "structured_dense", []string{"answer"})
 	assertTraceStage(t, trace, "global_matched", []string{"answer", "dense-first", "hierarchy"})
 	assertTraceStage(t, trace, "document_selection", []string{"hierarchy"})
 	assertTraceStage(t, trace, "rerank_pool", []string{"hierarchy", "answer"})

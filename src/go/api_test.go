@@ -3,11 +3,21 @@ package main
 import (
 	"archive/zip"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestCoreContextRequiresTenant(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/v1/core-context", nil)
+	recorder := httptest.NewRecorder()
+	(&Server{}).handleCoreContext(recorder, request)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
+	}
+}
 
 func TestFixedInstanceUserKeyOverridesRequestIdentity(t *testing.T) {
 	request, err := http.NewRequest(http.MethodGet, "http://memory.test/v1/memories?user_key=query-user", nil)
@@ -245,5 +255,18 @@ func TestWatchedSourceExistsDetectsMovedFile(t *testing.T) {
 	}
 	if watchedSourceExists(sourceURI) {
 		t.Fatal("expected removed watched file to be treated as a move candidate")
+	}
+}
+
+func TestContentHashVersionInvalidatesOnlyPDFs(t *testing.T) {
+	common := []string{"Title", "body", "library", "collection"}
+	note := contentHashFor(common[0], "file:///library/note.md", common[1], common[2:]...)
+	book := contentHashFor(common[0], "file:///library/book.pdf", common[1], common[2:]...)
+	if note == book {
+		t.Fatal("expected PDF and non-PDF ingestion versions to differ")
+	}
+	wantNote := hashText(strings.Join([]string{contentHashVersion, "Title", "file:///library/note.md", "body", "library", "collection"}, "\n"))
+	if note != wantNote {
+		t.Fatal("non-PDF content hash must retain the previous ingestion version")
 	}
 }

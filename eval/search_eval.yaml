@@ -311,6 +311,22 @@ queries:
       answer:
         all_of: ["laws of large numbers", "Markov chains", "large deviations"]
 
+  - id: textbook_upfal_chapter_one_problem
+    difficulty: hard
+    category: textbook_structure
+    query: "What is a problem in ch 1 of Upfal's probability textbook?"
+    expected:
+      evidence:
+        - source:
+            relative_path: "textbooks/Probability and Stochastics/Upfal Probability and Computing/Probability-and-Computing-2nd-Edition_Upfal.pdf"
+            title: "Probability-and-Computing-2nd-Edition_Upfal.pdf"
+          any_of:
+            - "We flip a fair coin ten times"
+            - "We roll two standard six-sided dice"
+            - "The following problem is known as the Monty Hall problem"
+      answer:
+        any_of: ["fair coin", "six-sided dice", "Monty Hall"]
+
   - id: textbook_strang_column_and_null_spaces
     difficulty: hard
     category: textbook_concept
