@@ -189,6 +189,28 @@ Run these from `beemo-project`:
 ./scripts/beemo.sh down --profile garnetmoon
 ```
 
+## Database Migrations
+
+Memory Palace owns its PostgreSQL schema through ordered SQL migrations in
+`src/go/migrations`. Pending migrations run automatically before the HTTP
+server starts. Each migration runs in its own transaction under a PostgreSQL
+advisory lock, and its name and checksum are recorded in
+`memory_palace_schema_migrations`.
+
+Inspect or apply migrations without starting the HTTP server from `src/go`:
+
+```sh
+go run . migrate-status
+go run . migrate
+```
+
+Migration files are forward-only and immutable after release. Add schema
+changes in a new `NNNNNN_description.sql` file rather than editing an applied
+migration. Back up the database before migrations that rewrite stored data.
+
+The files under `src/psql` belong to the repository's earlier embedding-table
+prototype and are not part of the active Memory Palace migration chain.
+
 For Memory Palace alone, after PostgreSQL and Beemo's model services are
 already healthy:
 

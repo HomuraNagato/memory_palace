@@ -1,6 +1,6 @@
 services:
   memory_palace:
-    image: debian:bookworm-slim
+    image: localhost/memory-palace:latest
     container_name: memory_palace
     hostname: memory_palace
     stdin_open: true
